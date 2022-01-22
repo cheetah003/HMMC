@@ -181,7 +181,7 @@ def init_model(args, device, n_gpu, local_rank):
 
     # Prepare model
     cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed')
-    model = BirdModel.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
+    model = BirdPreTrainedModel.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
                                       task_config=args)
 
     model.to(device)
@@ -232,8 +232,7 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
 def dataloader_bird_pretrain(args, tokenizer):
     bird_dataset = dataload_bird_pretrain(root='/home/shenwenxue/data/dataset/bird/test_array',
-                               # jsonpath='/home/shenwenxue/data/dataset/bird/train_data_ocr.json',
-                               jsonpath='/home/shenwenxue/data/dataset/bird/test_data.json',
+                               jsonpath_asr='/home/shenwenxue/data/dataset/bird/test_data_asr.json',
                                tokenizer=tokenizer, stage=args.stage, max_words=args.max_words,
                                 max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
@@ -325,11 +324,12 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
         if n_gpu == 1:
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-        query_ids, query_mask, pos_video_data, hard_video_data, \
-        pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask = batch
-
-        loss = model(query_ids, query_mask, pos_video_data, hard_video_data, \
-               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask)
+        if args.stage == "stage1":
+            video_data, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask = batch
+            loss = model(video_data, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask)
+        else:
+            video_data, tag_ids, tag_mask, title_ids, title_mask = batch
+            loss = model(video_data, tag_ids, tag_mask, title_ids, title_mask)
 
         if n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
@@ -561,8 +561,8 @@ def main():
         logger.info("  Batch size = %d", args.batch_size_val)
         logger.info("  Num steps = %d", len(test_dataloader))
 
-    if args.do_train:
-        train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
+    if args.do_pretrain:
+        train_dataloader, train_length, train_sampler = dataloader_bird_pretrain(args, tokenizer)
         num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
                                         / args.gradient_accumulation_steps) * args.epochs
         # logger.info("train_dataloader len = {}".format(len(train_dataloader)))
@@ -606,9 +606,6 @@ def main():
         #     model = load_model(-1, args, n_gpu, device, model_file=best_output_model_file)
         #     eval_epoch(args, model, test_dataloader, device, n_gpu)
 
-    elif args.do_eval:
-        if args.local_rank == 0:
-            eval_epoch(args, model, test_dataloader, device, n_gpu)
     elif args.do_params:
         logger.info("do_params begin!")
         # total = sum([param.nelement() for param in model.parameters()])

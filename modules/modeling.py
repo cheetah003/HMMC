@@ -3,16 +3,17 @@ from __future__ import division
 from __future__ import print_function
 
 import logging
+from abc import ABC
 
 import torch
 from torch import nn
+import torch.functional as F
 from transformers import BertModel, BertConfig, AutoConfig, AutoModel
 
 from modules.until_module import PreTrainedModel, AllGather, CrossEn, Dual_CrossEn
 from modules.module_cross import CrossModel, CrossConfig, Transformer as TransformerClip
 from modules.module_vilbert import co_attention_model
 from modules.module_clip import CLIP, convert_weights
-from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 
 logger = logging.getLogger(__name__)
 allgather = AllGather.apply
@@ -153,21 +154,17 @@ def check_attr(target_name, task_config):
     return hasattr(task_config, target_name) and task_config.__dict__[target_name]
 
 
-class CLIP4Clip(CLIP4ClipPreTrainedModel):
+class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
     def __init__(self, cross_config, clip_state_dict, task_config):
-        super(CLIP4Clip, self).__init__(cross_config)
+        super(BirdPreTrainedModel, self).__init__(cross_config)
         self.task_config = task_config
         self.ignore_video_index = -1
 
         assert self.task_config.max_words + self.task_config.max_frames <= cross_config.max_position_embeddings
 
-        self._stage_one = True
-        self._stage_two = False
-
-        show_log(task_config, "Stage-One:{}, Stage-Two:{}".format(self._stage_one, self._stage_two))
 
         self.loose_type = False
-        if self._stage_one and check_attr('loose_type', self.task_config):
+        if check_attr('loose_type', self.task_config):
             self.loose_type = True
             show_log(task_config, "Test retrieval by loose type.")
 
@@ -281,17 +278,17 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
 
         self.apply(self.init_weights)
 
-    def forward(self, video_data, video_mask, input_ids, input_mask, input_segment,
-                title_ids=None, title_mask=None, asr_ids=None, asr_mask=None):
+    def forward(self, video_data, tag_ids, tag_mask, title_ids, title_mask, asr_ids=None, asr_mask=None):
 
-        input_ids = input_ids.view(-1, input_ids.shape[-1])
+        tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
 
-        input_mask = input_mask.view(-1, input_mask.shape[-1])
-        input_segment = input_segment.view(-1, input_segment.shape[-1])
-        video_mask = video_mask.view(-1, video_mask.shape[-1])
+        tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
         title_ids = title_ids.view(-1, title_ids.shape[-1])
-        asr_ids = asr_ids.view(-1, title_ids.shape[-1])
+        title_mask = title_mask.view(-1, title_mask.shape[-1])
 
+        if self.task_config.stage == "stage1":
+            asr_ids = asr_ids.view(-1, title_ids.shape[-1])
+            asr_mask = asr_mask.view(-1, asr_mask.shape[-1])
         # T x 3 x H x W
         video = torch.as_tensor(video_data).float()
         b, pair, bs, ts, channel, h, w = video.shape
@@ -305,29 +302,24 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
         # logger.info("masked_title.shape:{}".format(masked_title.shape))
         if self.training:
             loss = 0.
-            if self.task_config.do_pretrain:
-                sequence_output, visual_output = self.get_sequence_visual_output(input_ids, input_mask, input_segment,
-                                                                                 video, video_mask, shaped=True,
-                                                                                 video_frame=video_frame)
-                title_output = self.get_sequence_output(title_ids, input_mask, input_segment, shaped=True)
-                asr_output = self.get_sequence_output(asr_ids, input_mask, input_segment, shaped=True)
+            if self.task_config.stage == "stage1":
+                tag_output = self.get_sequence_output(tag_ids, tag_mask, shaped=True)
+                visual_output = self.get_visual_output(video, shaped=True, video_frame=video_frame)
+                title_output = self.get_sequence_output(title_ids, title_mask, shaped=True)
+                asr_output = self.get_sequence_output(asr_ids, asr_mask, shaped=True)
 
-                # co_sequence_output, co_visual_output = self.co_attention_model(visual_output, visual_output)
+                co_sequence_output, co_visual_output = self.co_attention_model(visual_output, visual_output)
                 #for contrasive loss
-                _, pooled_output = self.get_cross_output(video_fea=visual_output)
-                # video-query
-                sim_matrix, *_tmp = self.get_similarity_logits(sequence_output, pooled_output, input_mask, video_mask,
-                                                               shaped=True, loose_type=self.loose_type)
+                # video-tag
+                sim_matrix = self.get_similarity_logits(tag_output, co_visual_output)
                 sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
                 loss += sim_loss
                 # video-title
-                sim_video_title, *_tmp = self.get_similarity_logits(title_output, pooled_output, input_mask, video_mask,
-                                                               shaped=True, loose_type=self.loose_type)
+                sim_video_title = self.get_similarity_logits(title_output, co_visual_output)
                 sim_title_loss = self.loss_fct(sim_video_title) + self.loss_fct(sim_video_title.T)
                 loss += sim_title_loss
                 # video-asr
-                sim_video_asr, *_tmp = self.get_similarity_logits(asr_output, pooled_output, input_mask, video_mask,
-                                                             shaped=True, loose_type=self.loose_type)
+                sim_video_asr = self.get_similarity_logits(asr_output, co_visual_output)
                 sim_asr_loss = self.loss_fct(sim_video_asr) + self.loss_fct(sim_video_asr.T)
                 loss += sim_asr_loss
 
@@ -337,11 +329,9 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
                 # sim_title_tag_loss = self.loss_fct(sim_title_tag) + self.loss_fct(sim_title_tag.T)
                 # loss += sim_title_tag_loss
                 # title_output = self.get_sequence_output(title_ids, input_mask, input_segment, shaped=True)
-                # co_sequence_output, co_visual_output = self.co_attention_model(title_output, visual_output)
-                _, cross_videotitle_output = self.get_cross_output(text_fea=title_output,video_fea=visual_output)
+                co_sequence_output, co_visual_output = self.co_attention_model(title_output, visual_output)
                 # (video,title) - tag
-                sim_videotitle_tag, *_tmp = self.get_similarity_logits(sequence_output, cross_videotitle_output, input_mask, video_mask,
-                                                               shaped=True, loose_type=self.loose_type)
+                sim_videotitle_tag = self.get_similarity_logits(tag_output, co_visual_output)
                 sim_videotitle_tag_loss = self.loss_fct(sim_videotitle_tag) + self.loss_fct(sim_videotitle_tag.T)
                 loss += sim_videotitle_tag_loss
 
@@ -353,34 +343,18 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
                 # mlm_loss_ocr = self._calculate_mlm_loss(cross_output_ocr, masked_ocr_label)
                 # loss += mlm_loss_ocr
                 return loss
-            elif self.task_config.do_train:
-                sequence_output, visual_output = self.get_sequence_visual_output(input_ids, input_mask, input_segment,
-                                                                                 video, video_mask, shaped=True,
-                                                                                 video_frame=video_frame)
-                title_output = self.get_sequence_output(title_ids, input_mask, input_segment, shaped=True)
-                # logger.info("title_output.shape:{}".format(title_output.shape))
-                # logger.info("visual_output.shape:{}".format(visual_output.shape))
-                # _, pooled_output = self.get_cross_output(video_fea=visual_output, text_fea=title_output)
-
-                _, co_visual_output = self.co_attention_model(title_output, visual_output)
-                sim_matrix, *_tmp = self.get_similarity_logits(sequence_output, co_visual_output, input_mask, video_mask,
-                                                               shaped=True, loose_type=self.loose_type)
-                sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-                loss += sim_loss
-
-                # sim_title_tag = self.loose_similarity_for_text(sequence_output, title_output)
-                # sim_title_tag_loss = self.loss_fct(sim_title_tag) + self.loss_fct(sim_title_tag.T)
-                # loss += sim_title_tag_loss
-                return loss
+            elif self.task_config.stage == "stage2":
+                # add MMM and VTM
+                pass
         else:
             return None
 
-    def _calculate_mlm_loss(self, sequence_output_alm, pairs_token_labels):
+    def calculate_mlm_loss(self, sequence_output_alm, pairs_token_labels):
         alm_scores = self.cls(sequence_output_alm)
         alm_loss = self.alm_loss_fct(alm_scores.view(-1, self.bert_config.vocab_size), pairs_token_labels.view(-1))
         return alm_loss
 
-    def _calculate_mfm_loss(self, visual_output_alm, video, video_mask, video_labels_index):
+    def calculate_mfm_loss(self, visual_output_alm, video, video_mask, video_labels_index):
         afm_scores = self.cls_visual(visual_output_alm)
         afm_scores_tr = afm_scores.view(-1, afm_scores.shape[-1])
 
@@ -401,41 +375,33 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
         nce_loss = nce_loss.mean()
         return nce_loss
 
-    def get_sequence_output(self, input_ids, token_type_ids, attention_mask, return_hidden=False, shaped=False):
+    def get_sequence_output(self, input_ids, attention_mask, return_hidden=False, shaped=False):
         if shaped is False:
             input_ids = input_ids.view(-1, input_ids.shape[-1])
-            token_type_ids = token_type_ids.view(-1, token_type_ids.shape[-1])
             attention_mask = attention_mask.view(-1, attention_mask.shape[-1])
 
         bs_pair = input_ids.size(0)
-        if False:
-            # logger.info("Clip encoder")
-            sequence_hidden = self.clip.encode_text(input_ids).float()
+        # logger.info("albert encoder")
+        # logger.info("input_ids.shape:{}".format(input_ids.shape))
+        sequence_hidden = self.chinese_bert(input_ids)
+        # logger.info("before sequence_hidden.shape:{}".format(sequence_hidden.shape))
+        if return_hidden:
+            sequence_hidden = sequence_hidden[0]
         else:
-            # logger.info("albert encoder")
-            # logger.info("input_ids.shape:{}".format(input_ids.shape))
-            sequence_hidden = self.chinese_bert(input_ids)
-            # logger.info("before sequence_hidden.shape:{}".format(sequence_hidden.shape))
-            if return_hidden:
-                sequence_hidden = sequence_hidden[0]
-            else:
-                sequence_hidden = sequence_hidden[1]
-
+            sequence_hidden = sequence_hidden[1]
 
         sequence_hidden = sequence_hidden.view(bs_pair, -1, sequence_hidden.size(-1))
         # logger.info("after sequence_hidden1.shape:{}".format(sequence_hidden.shape))
         return sequence_hidden
 
-    def get_visual_output(self, video, video_mask, shaped=False, video_frame=-1):
+    def get_visual_output(self, video, shaped=False, video_frame=-1):
         if shaped is False:
-            video_mask = video_mask.view(-1, video_mask.shape[-1])
             video = torch.as_tensor(video).float()
             b, pair, bs, ts, channel, h, w = video.shape
             video = video.view(b * pair * bs * ts, channel, h, w)
             video_frame = bs * ts
-
-        bs_pair = video_mask.size(0)
-        # logger.info("video.shape:{}".format(video.shape))
+        bs_pair = video.size(0) // video_frame
+        logger.info("video.shape:{}".format(video.shape))
         visual_hidden = self.clip.encode_image(video, video_frame=video_frame).float()
         # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
         visual_hidden = visual_hidden.view(bs_pair, -1, visual_hidden.size(-1))
@@ -493,24 +459,20 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
 
         return cross_layers, pooled_output
 
-    def _mean_pooling_for_similarity_sequence(self, sequence_output, attention_mask):
+    def mean_pooling_for_similarity_sequence(self, sequence_output, attention_mask):
         attention_mask_un = attention_mask.to(dtype=torch.float).unsqueeze(-1)
         attention_mask_un[:, 0, :] = 0.
         sequence_output = sequence_output * attention_mask_un
         text_out = torch.sum(sequence_output, dim=1) / torch.sum(attention_mask_un, dim=1, dtype=torch.float)
         return text_out
 
-    def _mean_pooling_for_similarity_visual(self, visual_output, video_mask, ):
-        video_mask_un = video_mask.to(dtype=torch.float).unsqueeze(-1)
-        visual_output = visual_output * video_mask_un
-        video_mask_un_sum = torch.sum(video_mask_un, dim=1, dtype=torch.float)
-        video_mask_un_sum[video_mask_un_sum == 0.] = 1.
-        video_out = torch.sum(visual_output, dim=1) / video_mask_un_sum
+    def mean_pooling_for_similarity_visual(self, visual_output):
+        video_out = torch.sum(visual_output, dim=1) / visual_output.size(1)
         return video_out
 
-    def _mean_pooling_for_similarity(self, sequence_output, visual_output, attention_mask, video_mask, ):
-        text_out = self._mean_pooling_for_similarity_sequence(sequence_output, attention_mask)
-        video_out = self._mean_pooling_for_similarity_visual(visual_output, video_mask)
+    def mean_pooling_for_similarity(self, sequence_output, visual_output, attention_mask, video_mask, ):
+        text_out = self.mean_pooling_for_similarity_sequence(sequence_output, attention_mask)
+        video_out = self.mean_pooling_for_similarity_visual(visual_output, video_mask)
 
         return text_out, video_out
 
@@ -535,19 +497,18 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
         # logger.info("retrieve_logits.shape:{}".format(retrieve_logits.shape))
         return retrieve_logits
 
-    def _loose_similarity(self, sequence_output, visual_output, attention_mask, video_mask, sim_header="meanP"):
+    def loose_similarity(self, sequence_output, visual_output):
         sequence_output, visual_output = sequence_output.contiguous(), visual_output.contiguous()
 
         if self.training:
             visual_output = allgather(visual_output, self.task_config)
-            video_mask = allgather(video_mask, self.task_config)
             sequence_output = allgather(sequence_output, self.task_config)
             torch.distributed.barrier()
 
         visual_output = visual_output.squeeze(1)
         visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
-        # visual_output = self._mean_pooling_for_similarity_visual(visual_output, video_mask)
-        # visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
+        visual_output = self.mean_pooling_for_similarity_visual(visual_output)
+        visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
 
         sequence_output = sequence_output.squeeze(1)
         sequence_output = sequence_output / sequence_output.norm(dim=-1, keepdim=True)
@@ -558,10 +519,10 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
         logit_scale = self.clip.logit_scale.exp()
         # logger.info("logit_scale:{}".format(logit_scale))
         retrieve_logits = logit_scale * torch.matmul(sequence_output, visual_output.t())
-        # logger.info("retrieve_logits.shape:{}".format(retrieve_logits.shape))
+        logger.info("retrieve_logits.shape:{}".format(retrieve_logits.shape))
         return retrieve_logits
 
-    def _cross_similarity(self, sequence_output, visual_output, attention_mask, video_mask):
+    def cross_similarity(self, sequence_output, visual_output, attention_mask, video_mask):
         sequence_output, visual_output = sequence_output.contiguous(), visual_output.contiguous()
 
         if self.training:
@@ -616,19 +577,46 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
         retrieve_logits = torch.cat(retrieve_logits_list, dim=0)
         return retrieve_logits
 
-    def get_similarity_logits(self, sequence_output, visual_output, attention_mask, video_mask, shaped=False,
-                              loose_type=False):
-        if shaped is False:
-            attention_mask = attention_mask.view(-1, attention_mask.shape[-1])
-            video_mask = video_mask.view(-1, video_mask.shape[-1])
+    def get_similarity_logits(self, sequence_output, visual_output):
+        retrieve_logits = self.loose_similarity(sequence_output, visual_output)
+        return retrieve_logits
 
-        contrastive_direction = ()
-        if loose_type:
-            assert self.sim_header in ["meanP", "seqLSTM", "seqTransf"]
-            retrieve_logits = self._loose_similarity(sequence_output, visual_output, attention_mask, video_mask,
-                                                     sim_header=self.sim_header)
+
+class BirdModel(BirdPreTrainedModel):
+    def forward(self, query_ids, query_mask, pos_video_data, hard_video_data,
+               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask):
+        query_ids = query_ids.view(-1, query_ids.shape[-1])
+
+        query_mask = query_mask.view(-1, query_mask.shape[-1])
+        pos_title_ids = pos_title_ids.view(-1, pos_title_ids.shape[-1])
+        pos_title_mask = pos_title_mask.view(-1, pos_title_mask.shape[-1])
+        hard_title_ids = hard_title_ids.view(-1, hard_title_ids.shape[-1])
+        hard_title_mask = hard_title_mask.view(-1, hard_title_mask.shape[-1])
+
+        # T x 3 x H x W
+        pos_video = torch.as_tensor(pos_video_data).float()
+        hard_video = torch.as_tensor(hard_video_data).float()
+        b, pair, bs, ts, channel, h, w = pos_video.shape
+        pos_video = pos_video.view(b * pair * bs * ts, channel, h, w)
+        hard_video = hard_video.view(b * pair * bs * ts, channel, h, w)
+        video_frame = bs * ts
+        if self.training:
+            loss = 0.0
+            query_output = self.get_sequence_output(query_ids, query_mask, return_hidden=False, shaped=True)
+            pos_visual_output = self.get_visual_output(pos_video, shaped=True, video_frame=video_frame)
+            hard_visual_output = self.get_visual_output(hard_video, shaped=True, video_frame=video_frame)
+            pos_title_output = self.get_sequence_output(pos_title_ids, pos_title_mask, shaped=True)
+            hard_title_output = self.get_sequence_output(hard_title_ids, hard_title_mask, shaped=True)
+            logger.info("pos_title_output.shape:{}".format(pos_title_output.shape))
+            logger.info("pos_visual_output.shape:{}".format(pos_visual_output.shape))
+            # _, pooled_output = self.get_cross_output(video_fea=visual_output, text_fea=title_output)
+
+            _, pos_co_visual_output = self.co_attention_model(pos_title_output, pos_visual_output)
+            _, hard_co_visual_output = self.co_attention_model(hard_title_output, hard_visual_output)
+            sim_matrix = self.get_similarity_logits(query_output, pos_co_visual_output)
+            sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            loss += sim_loss
+
+            return loss
         else:
-            assert self.sim_header in ["tightTransf"]
-            retrieve_logits = self._cross_similarity(sequence_output, visual_output, attention_mask, video_mask, )
-
-        return retrieve_logits, contrastive_direction
+            return None
