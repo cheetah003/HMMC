@@ -4,7 +4,7 @@ from __future__ import unicode_literals
 from __future__ import print_function
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4,5,6,7'
 import torch
 from torch.utils.data import (SequentialSampler)
 import numpy as np
@@ -92,6 +92,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--text_num_hidden_layers', type=int, default=12, help="Layer NO. of text.")
     parser.add_argument('--visual_num_hidden_layers', type=int, default=12, help="Layer NO. of visual.")
     parser.add_argument('--cross_num_hidden_layers', type=int, default=6, help="Layer NO. of cross.")
+    parser.add_argument('--tag_num_hidden_layers', type=int, default=6, help="Layer NO. of tag model.")
 
     parser.add_argument('--train_frame_order', type=int, default=0, choices=[0, 1, 2],
                         help="Frame order, 0: ordinary order; 1: reverse order; 2: random order.")
@@ -99,7 +100,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="Frame order, 0: ordinary order; 1: reverse order; 2: random order.")
 
     parser.add_argument('--loose_type', action='store_true', help="Default using tight type for retrieval.")
-
+    
     parser.add_argument('--freeze_layer_num', type=int, default=0, help="Layer NO. of CLIP need to freeze.")
     parser.add_argument('--slice_framepos', type=int, default=0, choices=[0, 1, 2],
                         help="0: cut from head frames; 1: cut from tail frames; 2: extract frames uniformly.")
@@ -229,29 +230,9 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
     return optimizer, scheduler, model
 
-
-def dataloader_bird_pretrain(args, tokenizer):
-    bird_dataset = dataload_bird_pretrain(root='/home/shenwenxue/data/dataset/bird/test_array',
-                               # jsonpath='/home/shenwenxue/data/dataset/bird/train_data_ocr.json',
-                               jsonpath='/home/shenwenxue/data/dataset/bird/test_data.json',
-                               tokenizer=tokenizer, stage=args.stage, max_words=args.max_words,
-                                max_frames=args.max_frames)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
-    dataloader = DataLoader(
-        bird_dataset,
-        batch_size=args.batch_size // args.n_gpu,
-        num_workers=args.num_thread_reader,
-        pin_memory=True,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-    )
-    return dataloader, len(bird_dataset), train_sampler
-
 def dataloader_bird_train(args, tokenizer):
-    bird_trainset = dataload_bird_train(root='/home/shenwenxue/data/dataset/bird/test_array',
-                                jsonpath_asr='/home/shenwenxue/data/dataset/bird/test_data_asr.json',
-                                jsonpath_query ='/home/shenwenxue/data/dataset/bird/test_data_query.json',
+    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_frame_lmdb',
+                                jsonpath_query ='/ai/swxdisk/data/bird/query_data_train.json',
                                 tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
     dataloader = DataLoader(
@@ -268,9 +249,8 @@ def dataloader_bird_train(args, tokenizer):
 
 
 def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/home/shenwenxue/data/dataset/bird/test_array',
-                                     jsonpath_asr='/home/shenwenxue/data/dataset/bird/test_data_asr.json',
-                                     jsonpath_query='/home/shenwenxue/data/dataset/bird/test_data_query_val.json',
+    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_frame_lmdb',
+                                     jsonpath_query='/ai/swxdisk/data/bird/query_data_val.json',
                                      tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
     dataloader = DataLoader(
         bird_testset,
@@ -325,10 +305,10 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
         if n_gpu == 1:
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-        query_ids, query_mask, pos_video_data, hard_video_data, \
+        query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
         pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask = batch
 
-        loss = model(query_ids, query_mask, pos_video_data, hard_video_data, \
+        loss = model(query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
                pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask)
 
         if n_gpu > 1:
@@ -409,13 +389,13 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         # ----------------------------
         for bid, batch in enumerate(test_dataloader):
             batch = tuple(t.to(device) for t in batch)
-            query_ids, query_mask, video, title_ids, title_mask = batch
+            query_ids, query_mask, video, video_mask, title_ids, title_mask = batch
             logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
             logger.info("video.shape:{}".format(video.shape))
             b, _, num_frame, *_t = video.shape
             logger.info("eval video.shape:{}".format(video.shape))
             query_output = model.get_sequence_output(query_ids, query_mask, shaped=False)
-            visual_output = model.get_visual_output(video, shaped=False)
+            visual_output = model.get_visual_output(video, video_mask, shaped=False)
             title_output = model.get_sequence_output(title_ids, title_mask, shaped=False)
             _, visual_output = model.co_attention_model(title_output, visual_output)
             # co_sequence_output = co_sequence_output[:, 0, :]

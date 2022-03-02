@@ -92,6 +92,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--text_num_hidden_layers', type=int, default=12, help="Layer NO. of text.")
     parser.add_argument('--visual_num_hidden_layers', type=int, default=12, help="Layer NO. of visual.")
     parser.add_argument('--cross_num_hidden_layers', type=int, default=6, help="Layer NO. of cross.")
+    parser.add_argument('--tag_num_hidden_layers', type=int, default=6, help="Layer NO. of tag model.")
 
     parser.add_argument('--train_frame_order', type=int, default=0, choices=[0, 1, 2],
                         help="Frame order, 0: ordinary order; 1: reverse order; 2: random order.")
@@ -108,7 +109,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--sim_header', type=str, default="meanP",
                         choices=["meanP", "seqLSTM", "seqTransf", "tightTransf"],
                         help="choice a similarity header.")
-    parser.add_argument('--stage', type=str, default="stage1",choices=["stage1", "stage1"],
+    parser.add_argument('--stage', type=str, default="stage1",choices=["stage1", "stage2"],
                         help="choose pretrain stage.")
 
     args = parser.parse_args()
@@ -231,8 +232,8 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
 
 def dataloader_bird_pretrain(args, tokenizer):
-    bird_dataset = dataload_bird_pretrain(root='/home/shenwenxue/data/dataset/bird/test_array',
-                               jsonpath_asr='/home/shenwenxue/data/dataset/bird/test_data_asr.json',
+    bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/test_array',
+                               jsonpath_asr='/ai/swxdisk/data/bird/test_data_asr.json',
                                tokenizer=tokenizer, stage=args.stage, max_words=args.max_words,
                                 max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
@@ -247,29 +248,10 @@ def dataloader_bird_pretrain(args, tokenizer):
     )
     return dataloader, len(bird_dataset), train_sampler
 
-def dataloader_bird_train(args, tokenizer):
-    bird_trainset = dataload_bird_train(root='/home/shenwenxue/data/dataset/bird/test_array',
-                                jsonpath_asr='/home/shenwenxue/data/dataset/bird/test_data_asr.json',
-                                jsonpath_query ='/home/shenwenxue/data/dataset/bird/test_data_query.json',
-                                tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
-    dataloader = DataLoader(
-        bird_trainset,
-        batch_size=args.batch_size // args.n_gpu,
-        num_workers=args.num_thread_reader,
-        pin_memory=True,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-    )
-
-    return dataloader, len(bird_trainset), train_sampler
-
 
 def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/home/shenwenxue/data/dataset/bird/test_array',
-                                     jsonpath_asr='/home/shenwenxue/data/dataset/bird/test_data_asr.json',
-                                     jsonpath_query='/home/shenwenxue/data/dataset/bird/test_data_query_val.json',
+    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_frame_lmdb',
+                                     jsonpath_query='/ai/swxdisk/data/bird/query_data_val.json',
                                      tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
     dataloader = DataLoader(
         bird_testset,
@@ -325,11 +307,11 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
         if args.stage == "stage1":
-            video_data, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask = batch
-            loss = model(video_data, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask)
+            video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask = batch
+            loss = model(video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask)
         else:
-            video_data, tag_ids, tag_mask, title_ids, title_mask = batch
-            loss = model(video_data, tag_ids, tag_mask, title_ids, title_mask)
+            video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask = batch
+            loss = model(video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask)
 
         if n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
@@ -409,13 +391,12 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         # ----------------------------
         for bid, batch in enumerate(test_dataloader):
             batch = tuple(t.to(device) for t in batch)
-            query_ids, query_mask, video, title_ids, title_mask = batch
+            query_ids, query_mask, video, video_mask, title_ids, title_mask = batch
             logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
-            logger.info("video.shape:{}".format(video.shape))
             b, _, num_frame, *_t = video.shape
             logger.info("eval video.shape:{}".format(video.shape))
             query_output = model.get_sequence_output(query_ids, query_mask, shaped=False)
-            visual_output = model.get_visual_output(video, shaped=False)
+            visual_output = model.get_visual_output(video, video_mask, shaped=False)
             title_output = model.get_sequence_output(title_ids, title_mask, shaped=False)
             _, visual_output = model.co_attention_model(title_output, visual_output)
             # co_sequence_output = co_sequence_output[:, 0, :]
@@ -553,6 +534,12 @@ def main():
                 # paramenters which < freeze_layer_num will be freezed
                 param.requires_grad = False
 
+    if args.stage == "stage2":
+        #stage 2 need to freeze video/text encoder and co_attention model,only train tag model
+        for name, param in model.named_parameters():
+            if name.find("clip") != -1 or name.find("chinese_bert") != -1 or name.find("co_attention_model") != -1:
+                param.requires_grad = False
+            logger.info("name:{},param.requires_grad:{}".format(name, param.requires_grad))
     test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
 
     if args.local_rank == 0:

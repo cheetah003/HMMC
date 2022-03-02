@@ -1239,23 +1239,19 @@ class BertImgPredictionHeadTransform(nn.Module):
 
 
 class BertLMPredictionHead(nn.Module):
-    def __init__(self, config, bert_model_embedding_weights):
+    def __init__(self, config):
         super(BertLMPredictionHead, self).__init__()
         self.transform = BertPredictionHeadTransform(config)
 
         # The output weights are the same as the input embeddings, but there is
         # an output-only bias for each token.
-        self.decoder = nn.Linear(
-            bert_model_embedding_weights.size(1),
-            bert_model_embedding_weights.size(0),
-            bias=False,
-        )
-        self.decoder.weight = bert_model_embedding_weights
-        self.bias = nn.Parameter(torch.zeros(bert_model_embedding_weights.size(0)))
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size,bias=False,)
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.decoder.bias = self.bias
 
     def forward(self, hidden_states):
         hidden_states = self.transform(hidden_states)
-        hidden_states = self.decoder(hidden_states) + self.bias
+        hidden_states = self.decoder(hidden_states)
         return hidden_states
 
 

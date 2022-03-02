@@ -7,9 +7,14 @@ import numpy as np
 import lmdb
 import torch
 import random
+from torchvision import transforms
 from torchvision.datasets import VisionDataset
 from torch.utils.data import DataLoader, Dataset
 from transformers import BertTokenizer
+from dataloaders.randaugment import RandomAugment
+from PIL import Image
+import cv2
+
 
 def read_json(path):
     with open(path, 'r', encoding='utf8') as f:
@@ -55,7 +60,15 @@ class dataload_bird_pretrain(VisionDataset):
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
-
+        self.transform = transforms.Compose([
+            transforms.RandomResizedCrop(self.resolution, scale=(0.2, 1.0),
+                                         interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            RandomAugment(2,7,isPIL=True,augs=['Identity','AutoContrast','Equalize','Brightness','Sharpness',
+                                              'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate']),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
     def __enter__(self):
         return self
 
@@ -120,14 +133,20 @@ class dataload_bird_pretrain(VisionDataset):
         return pairs_text, pairs_mask, pairs_segment
 
     def _get_video(self, video_key=None):
-        video_key = video_key.encode()
-        video = self._txn.get(video_key)
-        video_data = np.frombuffer(video)
-        # video.shape: (1, 12, 1, 3, 224, 224)
-        video_data.dtype = 'float16'
-
-        # print("data:{}".format(video_data))
-        # print("caption:{}".format(caption))
+        video_list = list()
+        for i in range(self.max_frames):
+            video_key_new = video_key + "_%d" % i
+            video_key_new = video_key_new.encode()
+            video = self._txn.get(video_key_new)
+            frame_buffer = np.frombuffer(video, dtype=np.uint8)
+            # print("frame_buffer.shape:{}".format(frame_buffer.shape))
+            frame_data = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+            # print("frame_data.shape:{}".format(frame_data.shape))
+            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+            frame_img = Image.fromarray(frame_rgb).convert("RGB")
+            frame_data = self.transform(frame_img)
+            video_list.append(frame_data)
+        video_data = np.stack(video_list)
         video_data = video_data.copy()
         video_data = video_data.astype('float64')
         video_data = video_data.reshape([-1, self.max_frames, 1, 3, self.resolution, self.resolution])
@@ -159,6 +178,7 @@ class dataload_bird_pretrain(VisionDataset):
         item = self.datalist[index]
         video_key = item['video_id']
         video_data = self._get_video(video_key)
+        video_mask = np.ones(self.max_frames, dtype=np.long)
         ########### not used ocr ###############
         # title_ids = masked_title = masked_title_label = masked_ocr = masked_ocr_label = ocr_ids
         ######################################
@@ -172,16 +192,16 @@ class dataload_bird_pretrain(VisionDataset):
         if self.stage == "stage1":
             asr_text = item['asr']
             asr_ids, asr_mask, _, = self._get_text(asr_text)
-            return video_data, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask
+            return video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask
         else:
-            return video_data, tag_ids, tag_mask, title_ids, title_mask
+            return video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask
 
     def __len__(self) -> int:
         return self._length
 
 
 class dataload_bird_train(VisionDataset):
-    def __init__(self, root: str, jsonpath_asr:str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
+    def __init__(self, root: str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
                  resolution=224, max_words=32, max_frames=24, transform: Optional[Callable] = None,
                  is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
         super().__init__(root, transform=transform)
@@ -202,13 +222,21 @@ class dataload_bird_train(VisionDataset):
         # with open(os.path.join(root, "metadata.json"), "r") as fp:
         #     metadata = json.load(fp)
         # self._length = metadata["length"]
-        self.datadict = read_json(jsonpath_asr)
+        # self.datadict = read_json(jsonpath_asr)
         self.datalist = read_json_line(jsonpath_query)
 
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
-
+        self.transform = transforms.Compose([
+            transforms.RandomResizedCrop(self.resolution, scale=(0.5, 1.0),
+                                         interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            RandomAugment(2,7,isPIL=True,augs=['Identity','AutoContrast','Equalize','Brightness','Sharpness',
+                                              'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate']),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
     def __enter__(self):
         return self
 
@@ -219,7 +247,7 @@ class dataload_bird_train(VisionDataset):
             self._env.close()
 
     def _initEnv(self):
-        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 8, subdir=True, readonly=True, readahead=False,
+        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 500, subdir=True, readonly=True, readahead=False,
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
@@ -273,14 +301,20 @@ class dataload_bird_train(VisionDataset):
         return pairs_text, pairs_mask, pairs_segment
 
     def _get_video(self, video_key=None):
-        video_key = video_key.encode()
-        video = self._txn.get(video_key)
-        video_data = np.frombuffer(video)
-        # video.shape: (1, 12, 1, 3, 224, 224)
-        video_data.dtype = 'float16'
-
-        # print("data:{}".format(video_data))
-        # print("caption:{}".format(caption))
+        video_list = list()
+        for i in range(self.max_frames):
+            video_key_new = video_key + "_%d" % i
+            video_key_new = video_key_new.encode()
+            video = self._txn.get(video_key_new)
+            frame_buffer = np.frombuffer(video, dtype=np.uint8)
+            # print("frame_buffer.shape:{}".format(frame_buffer.shape))
+            frame_data = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+            # print("frame_data.shape:{}".format(frame_data.shape))
+            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+            frame_img = Image.fromarray(frame_rgb).convert("RGB")
+            frame_data = self.transform(frame_img)
+            video_list.append(frame_data)
+        video_data = np.stack(video_list)
         video_data = video_data.copy()
         video_data = video_data.astype('float64')
         video_data = video_data.reshape([-1, self.max_frames, 1, 3, self.resolution, self.resolution])
@@ -303,9 +337,9 @@ class dataload_bird_train(VisionDataset):
         query = item['query']
         poslist = item['video_id']
         hardneglist = item['hardneg_video_id']
-        pos_id = random.choice(poslist)
-        hardneg_id = random.choice(hardneglist)
-        return query, pos_id, hardneg_id
+        pos_item = random.choice(poslist)
+        hardneg_item = random.choice(hardneglist)
+        return query, pos_item, hardneg_item
 
     def __getitem__(self, index: int):
         """
@@ -318,11 +352,11 @@ class dataload_bird_train(VisionDataset):
         if self._env is None:
             self._initEnv()
         item = self.datalist[index]
-        query, pos_videoid, hard_videoid = self._get_pos_hardneg_pair(item)
+        query, pos_item, hard_item = self._get_pos_hardneg_pair(item)
+        pos_videoid = "Video" + pos_item['docid']
+        hard_videoid = "Video" + hard_item['docid']
         pos_video_data = self._get_video(pos_videoid)
         hard_video_data = self._get_video(hard_videoid)
-        pos_item = self.datadict[pos_videoid]
-        hard_item = self.datadict[hard_videoid]
         pos_title = pos_item['title']
         hard_title = hard_item['title']
         # print("title[{}]:{}".format(index,title_text))
@@ -330,7 +364,9 @@ class dataload_bird_train(VisionDataset):
         query_ids, query_mask, _ = self._get_text(query)
         pos_title_ids, pos_title_mask, _ = self._get_text(pos_title)
         hard_title_ids, hard_title_mask, _ = self._get_text(hard_title)
-        return query_ids, query_mask, pos_video_data, hard_video_data, \
+        pos_video_mask = np.ones(self.max_frames, dtype=np.long)
+        hard_video_mask = np.ones(self.max_frames, dtype=np.long)
+        return query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
                pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask
 
     def __len__(self) -> int:
@@ -338,7 +374,7 @@ class dataload_bird_train(VisionDataset):
 
 
 class dataload_bird_val(VisionDataset):
-    def __init__(self, root: str, jsonpath_asr:str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
+    def __init__(self, root: str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
                  resolution=224, max_words=32, max_frames=24, transform: Optional[Callable] = None,
                  is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
         super().__init__(root, transform=transform)
@@ -359,12 +395,16 @@ class dataload_bird_val(VisionDataset):
         # with open(os.path.join(root, "metadata.json"), "r") as fp:
         #     metadata = json.load(fp)
         # self._length = metadata["length"]
-        self.datadict = read_json(jsonpath_asr)
+        # self.datadict = read_json(jsonpath_asr)
         self.datalist = read_json_line(jsonpath_query)
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
-
+        self.transform = transforms.Compose([
+            transforms.Resize(self.resolution, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
 
     def __enter__(self):
         return self
@@ -376,7 +416,7 @@ class dataload_bird_val(VisionDataset):
             self._env.close()
 
     def _initEnv(self):
-        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 8, subdir=True, readonly=True, readahead=False,
+        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 500, subdir=True, readonly=True, readahead=False,
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
@@ -404,6 +444,12 @@ class dataload_bird_val(VisionDataset):
 
         return masked_tokens, token_labels
 
+    def _get_pos_pair(self, item=None):
+        query = item['query']
+        poslist = item['video_id']
+        pos_item = poslist[0]
+        return query, pos_item
+
     def _get_text(self, caption=None):
         words = self.tokenizer.tokenize(caption)
         words = [self.SPECIAL_TOKEN["CLS_TOKEN"]] + words
@@ -430,16 +476,36 @@ class dataload_bird_val(VisionDataset):
         return pairs_text, pairs_mask, pairs_segment
 
     def _get_video(self, video_key=None):
-        video_key = video_key.encode()
-        video = self._txn.get(video_key)
-        video_data = np.frombuffer(video)
-        # video.shape: (1, 24, 1, 3, 224, 224)
-        video_data.dtype = 'float16'
-
+        video_list = list()
+        for i in range(self.max_frames):
+            video_key_new = video_key + "_%d" % i
+            video_key_new = video_key_new.encode()
+            video = self._txn.get(video_key_new)
+            frame_buffer = np.frombuffer(video, dtype=np.uint8)
+            # print("frame_buffer.shape:{}".format(frame_buffer.shape))
+            frame_data = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+            # print("frame_data.shape:{}".format(frame_data.shape))
+            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+            frame_img = Image.fromarray(frame_rgb).convert("RGB")
+            frame_data = self.transform(frame_img)
+            video_list.append(frame_data)
+        video_data = np.stack(video_list)
         video_data = video_data.copy()
         video_data = video_data.astype('float64')
         video_data = video_data.reshape([-1, self.max_frames, 1, 3, self.resolution, self.resolution])
-
+        #random sample start ##################################################
+        # video_index = np.arange(0, 24, 2)
+        # slice = list()
+        # k = 24 // self.max_frames
+        # for i in np.arange(self.max_frames):
+        #     index = random.choice(video_index[k * i:k * (i+1)])
+        #     slice.append(index)
+        # print("video_data.shpae:{}".format(video_data.shape))
+        # video_data = video_data[:, video_index, :, :, :, :]
+        # print("video_data2.shpae:{}".format(video_data.shape))
+        #random sample end ##################################################
+        # print("video:{},shape:{},type:{},dtype:{}".format(sys.getsizeof(video_data), video_data.shape, type(video_data),
+        #                                                   video_data.dtype))
         return video_data
 
     def __getitem__(self, index: int):
@@ -453,16 +519,16 @@ class dataload_bird_val(VisionDataset):
         if self._env is None:
             self._initEnv()
         item = self.datalist[index]
-        query = item["query"]
-        pos_videoid = item["video_id"]
+        query, pos_item = self._get_pos_pair(item)
+        pos_videoid = "Video" + pos_item["docid"]
         pos_video_data = self._get_video(pos_videoid)
-        pos_item = self.datadict[pos_videoid]
         pos_title = pos_item['title']
         # print("title[{}]:{}".format(index,title_text))
         # print("video[{}]:{}".format(index, item['video_id']))
         query_ids, query_mask, _ = self._get_text(query)
         pos_title_ids, pos_title_mask, _ = self._get_text(pos_title)
-        return query_ids, query_mask, pos_video_data, pos_title_ids, pos_title_mask
+        pos_video_mask = np.ones(self.max_frames, dtype=np.long)
+        return query_ids, query_mask, pos_video_data, pos_video_mask, pos_title_ids, pos_title_mask
 
     def __len__(self) -> int:
         return self._length
