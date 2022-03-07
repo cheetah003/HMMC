@@ -15,6 +15,8 @@ from dataloaders.randaugment import RandomAugment
 from PIL import Image
 import cv2
 
+#global, number of frames in lmdb per video
+g_lmdb_frames = 24
 
 def read_json(path):
     with open(path, 'r', encoding='utf8') as f:
@@ -134,7 +136,8 @@ class dataload_bird_pretrain(VisionDataset):
 
     def _get_video(self, video_key=None):
         video_list = list()
-        for i in range(self.max_frames):
+        global g_lmdb_frames
+        for i in range(g_lmdb_frames):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
             video = self._txn.get(video_key_new)
@@ -148,17 +151,19 @@ class dataload_bird_pretrain(VisionDataset):
             video_list.append(frame_data)
         video_data = np.stack(video_list)
         video_data = video_data.copy()
-        video_data = video_data.astype('float64')
-        video_data = video_data.reshape([-1, self.max_frames, 1, 3, self.resolution, self.resolution])
+        # video_data = video_data.astype('float64')
+        video_data = video_data.reshape([-1, g_lmdb_frames, 1, 3, self.resolution, self.resolution])
         #random sample start ##################################################
-        # video_index = np.arange(0, 24, 2)
-        # slice = list()
-        # k = 24 // self.max_frames
-        # for i in np.arange(self.max_frames):
-        #     index = random.choice(video_index[k * i:k * (i+1)])
-        #     slice.append(index)
-        # print("video_data.shpae:{}".format(video_data.shape))
-        # video_data = video_data[:, video_index, :, :, :, :]
+        assert g_lmdb_frames % self.max_frames == 0
+        video_index = np.arange(0, g_lmdb_frames)
+        # print("video_index:{}".format(video_index))
+        slice = list()
+        k = g_lmdb_frames // self.max_frames
+        for i in np.arange(self.max_frames):
+            index = random.choice(video_index[k * i:k * (i + 1)])
+            slice.append(index)
+        # print("slice:{}".format(slice))
+        video_data = video_data[:, slice, :, :, :, :]
         # print("video_data2.shpae:{}".format(video_data.shape))
         #random sample end ##################################################
         # print("video:{},shape:{},type:{},dtype:{}".format(sys.getsizeof(video_data), video_data.shape, type(video_data),
@@ -176,7 +181,7 @@ class dataload_bird_pretrain(VisionDataset):
         if self._env is None:
             self._initEnv()
         item = self.datalist[index]
-        video_key = item['video_id']
+        video_key = "Video" + item['docid']
         video_data = self._get_video(video_key)
         video_mask = np.ones(self.max_frames, dtype=np.long)
         ########### not used ocr ###############
@@ -189,12 +194,7 @@ class dataload_bird_pretrain(VisionDataset):
         # print("video[{}]:{}".format(index, item['video_id']))
         tag_ids, tag_mask, tag_segment = self._get_text(tag_text)
         title_ids, title_mask, _ = self._get_text(title_text)
-        if self.stage == "stage1":
-            asr_text = item['asr']
-            asr_ids, asr_mask, _, = self._get_text(asr_text)
-            return video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask
-        else:
-            return video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask
+        return video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask
 
     def __len__(self) -> int:
         return self._length
@@ -302,7 +302,8 @@ class dataload_bird_train(VisionDataset):
 
     def _get_video(self, video_key=None):
         video_list = list()
-        for i in range(self.max_frames):
+        global g_lmdb_frames
+        for i in range(g_lmdb_frames):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
             video = self._txn.get(video_key_new)
@@ -316,17 +317,19 @@ class dataload_bird_train(VisionDataset):
             video_list.append(frame_data)
         video_data = np.stack(video_list)
         video_data = video_data.copy()
-        video_data = video_data.astype('float64')
-        video_data = video_data.reshape([-1, self.max_frames, 1, 3, self.resolution, self.resolution])
+        # video_data = video_data.astype('float32')
+        video_data = video_data.reshape([-1, g_lmdb_frames, 1, 3, self.resolution, self.resolution])
         #random sample start ##################################################
-        # video_index = np.arange(0, 24, 2)
-        # slice = list()
-        # k = 24 // self.max_frames
-        # for i in np.arange(self.max_frames):
-        #     index = random.choice(video_index[k * i:k * (i+1)])
-        #     slice.append(index)
-        # print("video_data.shpae:{}".format(video_data.shape))
-        # video_data = video_data[:, video_index, :, :, :, :]
+        assert g_lmdb_frames % self.max_frames == 0
+        video_index = np.arange(0, g_lmdb_frames)
+        # print("video_index:{}".format(video_index))
+        slice = list()
+        k = g_lmdb_frames // self.max_frames
+        for i in np.arange(self.max_frames):
+            index = random.choice(video_index[k * i:k * (i + 1)])
+            slice.append(index)
+        # print("slice:{}".format(slice))
+        video_data = video_data[:, slice, :, :, :, :]
         # print("video_data2.shpae:{}".format(video_data.shape))
         #random sample end ##################################################
         # print("video:{},shape:{},type:{},dtype:{}".format(sys.getsizeof(video_data), video_data.shape, type(video_data),
@@ -477,7 +480,8 @@ class dataload_bird_val(VisionDataset):
 
     def _get_video(self, video_key=None):
         video_list = list()
-        for i in range(self.max_frames):
+        global g_lmdb_frames
+        for i in range(g_lmdb_frames):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
             video = self._txn.get(video_key_new)
@@ -491,19 +495,14 @@ class dataload_bird_val(VisionDataset):
             video_list.append(frame_data)
         video_data = np.stack(video_list)
         video_data = video_data.copy()
-        video_data = video_data.astype('float64')
-        video_data = video_data.reshape([-1, self.max_frames, 1, 3, self.resolution, self.resolution])
-        #random sample start ##################################################
-        # video_index = np.arange(0, 24, 2)
-        # slice = list()
-        # k = 24 // self.max_frames
-        # for i in np.arange(self.max_frames):
-        #     index = random.choice(video_index[k * i:k * (i+1)])
-        #     slice.append(index)
-        # print("video_data.shpae:{}".format(video_data.shape))
-        # video_data = video_data[:, video_index, :, :, :, :]
+        # video_data = video_data.astype('float64')
+        video_data = video_data.reshape([-1, g_lmdb_frames, 1, 3, self.resolution, self.resolution])
+        #uniform sample start ##################################################
+        assert g_lmdb_frames % self.max_frames == 0
+        video_index = np.arange(0, g_lmdb_frames, g_lmdb_frames//self.max_frames)
+        video_data = video_data[:, video_index, :, :, :, :]
         # print("video_data2.shpae:{}".format(video_data.shape))
-        #random sample end ##################################################
+        #uniform sample end ##################################################
         # print("video:{},shape:{},type:{},dtype:{}".format(sys.getsizeof(video_data), video_data.shape, type(video_data),
         #                                                   video_data.dtype))
         return video_data

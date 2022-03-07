@@ -28,6 +28,11 @@ from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_tr
 from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader
 from dataloaders.dataloader_msvd_retrieval import MSVD_DataLoader
 from dataloaders.dataloader_lsmdc_retrieval import LSMDC_DataLoader
+try:
+    # noinspection PyUnresolvedReferences
+    from apex import amp
+except ImportError:
+    amp = None
 
 torch.distributed.init_process_group(backend="nccl")
 
@@ -224,7 +229,8 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                          schedule='warmup_cosine', b1=0.9, b2=0.98, e=1e-6,
                          t_total=num_train_optimization_steps, weight_decay=weight_decay,
                          max_grad_norm=1.0)
-
+    if args.fp16_opt_level != "O0":
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
 
@@ -232,7 +238,7 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
 
 def dataloader_bird_pretrain(args, tokenizer):
-    bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/test_array',
+    bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/test_frame_lmdb',
                                jsonpath_asr='/ai/swxdisk/data/bird/test_data_asr.json',
                                tokenizer=tokenizer, stage=args.stage, max_words=args.max_words,
                                 max_frames=args.max_frames)
@@ -306,25 +312,28 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
         if n_gpu == 1:
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-        if args.stage == "stage1":
-            video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask = batch
-            loss = model(video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask, asr_ids, asr_mask)
-        else:
-            video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask = batch
-            loss = model(video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask)
+
+        video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask = batch
+        loss = model(video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask)
 
         if n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
-
-        loss.backward()
+        if args.fp16_opt_level != "O0":
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+                total_loss += float(scaled_loss)
+        else:
+            loss.backward()
+            total_loss += float(loss)
         forward_and_backward_time = time.time()
         logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
-        total_loss += float(loss)
         if (step + 1) % args.gradient_accumulation_steps == 0:
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if args.fp16_opt_level != "O0":
+                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             if scheduler is not None:
                 scheduler.step()  # Update learning rate schedule

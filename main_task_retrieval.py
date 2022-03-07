@@ -4,7 +4,7 @@ from __future__ import unicode_literals
 from __future__ import print_function
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4,5,6,7'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 from torch.utils.data import (SequentialSampler)
 import numpy as np
@@ -28,6 +28,11 @@ from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_tr
 from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader
 from dataloaders.dataloader_msvd_retrieval import MSVD_DataLoader
 from dataloaders.dataloader_lsmdc_retrieval import LSMDC_DataLoader
+try:
+    # noinspection PyUnresolvedReferences
+    from apex import amp
+except ImportError:
+    amp = None
 
 torch.distributed.init_process_group(backend="nccl")
 
@@ -225,6 +230,9 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                          t_total=num_train_optimization_steps, weight_decay=weight_decay,
                          max_grad_norm=1.0)
 
+    if args.fp16_opt_level != "O0":
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
 
@@ -315,14 +323,21 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             loss = loss.mean()  # mean() to average on multi-gpu.
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
-
-        loss.backward()
+        if args.fp16_opt_level != "O0":
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+                total_loss += float(scaled_loss)
+        else:
+            loss.backward()
+            total_loss += float(loss)
         forward_and_backward_time = time.time()
         logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
-        total_loss += float(loss)
-        if (step + 1) % args.gradient_accumulation_steps == 0:
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        if (step + 1) % args.gradient_accumulation_steps == 0:
+            if args.fp16_opt_level != "O0":
+                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             if scheduler is not None:
                 scheduler.step()  # Update learning rate schedule
@@ -515,6 +530,7 @@ def main():
     ## ####################################
     # freeze testing
     ## ####################################
+    '''
     assert args.freeze_layer_num <= 12 and args.freeze_layer_num >= -1
     if hasattr(model, "clip") and args.freeze_layer_num > -1:
         for name, param in model.clip.named_parameters():
@@ -532,7 +548,7 @@ def main():
             else:
                 # paramenters which < freeze_layer_num will be freezed
                 param.requires_grad = False
-
+    '''
     test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
 
     if args.local_rank == 0:
@@ -550,6 +566,7 @@ def main():
         coef_lr = args.coef_lr
         optimizer, scheduler, model = prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu,
                                                      args.local_rank, coef_lr=coef_lr)
+
         if args.local_rank == 0:
             logger.info("***** Running training *****")
             logger.info("  Num examples = %d", train_length)

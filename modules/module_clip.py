@@ -22,8 +22,10 @@ _MODELS = {
     "RN101": "https://openaipublic.azureedge.net/clip/models/8fa8567bab74a42d41c5915025a8e4538c3bdbe8804a470a72f30b0d94fab599/RN101.pt",
     "RN50x4": "https://openaipublic.azureedge.net/clip/models/7e526bd135e493cef0776de27d5f42653e6b4c8bf9e0f653bb11773263205fdd/RN50x4.pt",
     "RN50x16": "https://openaipublic.azureedge.net/clip/models/52378b407f34354e150460fe41077663dd5b39c54cd0bfd2b27167a4a06ec9aa/RN50x16.pt",
+    "RN50x64": "https://openaipublic.azureedge.net/clip/models/be1cfb55d75a9666199fb2206c106743da0f6468c9d327f3e0d0a543a9919d9c/RN50x64.pt",
     "ViT-B/32": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
     "ViT-B/16": "https://openaipublic.azureedge.net/clip/models/5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f/ViT-B-16.pt",
+    "ViT-L/14": "https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt",
 }
 
 def _download(url: str, root: str = os.path.expanduser("~/.cache/clip")):
@@ -293,7 +295,7 @@ class VisualTransformer(nn.Module):
                                    stride=(1, patch_size, patch_size), padding=(1, 0, 0), bias=False)
 
     def forward(self, x: torch.Tensor, video_frame=-1):
-
+        logger.info("x.shape:{}".format(x.shape))
         if self.linear_patch == '3d':
             assert video_frame != -1
             x_3d = x.reshape(-1, video_frame, x.shape[-3], x.shape[-2], x.shape[-1])
@@ -303,16 +305,17 @@ class VisualTransformer(nn.Module):
             x = x_3d.reshape(-1, x_3d.shape[-3], x_3d.shape[-2], x_3d.shape[-1]).contiguous() # shape = [*, width, grid, grid]
         else:
             x = self.conv1(x)  # shape = [*, width, grid, grid]
-
+        logger.info("x conv1.shape:{}".format(x.shape))
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
         x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
         x = self.ln_pre(x)
-
         x = x.permute(1, 0, 2)  # NLD -> LND
+        logger.info("x ln_pre.shape:{}".format(x.shape))
         x = self.transformer(x, video_frame=video_frame)
         x = x.permute(1, 0, 2)  # LND -> NLD
+        logger.info("x transformer.shape:{}".format(x.shape))
 
         # Move the three lines below to `encode_image` for entire hidden sequence
         # x = self.ln_post(x[:, 0, :])
@@ -524,7 +527,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict):
+def build_model(state_dict: dict, local_rank, embed_dim=768):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -542,23 +545,35 @@ def build_model(state_dict: dict):
         assert output_width ** 2 + 1 == state_dict["visual.attnpool.positional_embedding"].shape[0]
         image_resolution = output_width * 32
 
-    embed_dim = state_dict["text_projection"].shape[1]
+    # embed_dim = state_dict["text_projection"].shape[1]
     context_length = state_dict["positional_embedding"].shape[0]
     vocab_size = state_dict["token_embedding.weight"].shape[0]
     transformer_width = state_dict["ln_final.weight"].shape[0]
     transformer_heads = transformer_width // 64
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))
+    if local_rank == 0:
+        logger.info("\t embed_dim: {}".format(embed_dim))
+        logger.info("\t image_resolution: {}".format(image_resolution))
+        logger.info("\t vision_layers: {}".format(vision_layers))
+        logger.info("\t vision_width: {}".format(vision_width))
+        logger.info("\t vision_patch_size: {}".format(vision_patch_size))
+        logger.info("\t context_length: {}".format(context_length))
+        logger.info("\t not used vocab_size: {}".format(vocab_size))
+        logger.info("\t transformer_width: {}".format(transformer_width))
+        logger.info("\t transformer_heads: {}".format(transformer_heads))
+        logger.info("\t transformer_layers: {}".format(transformer_layers))
 
     model = CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
         context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
-    )
+    ).float()
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
         if key in state_dict:
             del state_dict[key]
 
-    convert_weights(model)
-    model.load_state_dict(state_dict)
-    return model.eval()
+    # convert_weights(model)
+    # model.load_state_dict(state_dict)
+    # return model.eval()
+    return model
