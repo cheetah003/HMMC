@@ -295,7 +295,7 @@ class VisualTransformer(nn.Module):
                                    stride=(1, patch_size, patch_size), padding=(1, 0, 0), bias=False)
 
     def forward(self, x: torch.Tensor, video_frame=-1):
-        logger.info("x.shape:{}".format(x.shape))
+        # logger.info("x.shape:{}".format(x.shape))
         if self.linear_patch == '3d':
             assert video_frame != -1
             x_3d = x.reshape(-1, video_frame, x.shape[-3], x.shape[-2], x.shape[-1])
@@ -305,17 +305,17 @@ class VisualTransformer(nn.Module):
             x = x_3d.reshape(-1, x_3d.shape[-3], x_3d.shape[-2], x_3d.shape[-1]).contiguous() # shape = [*, width, grid, grid]
         else:
             x = self.conv1(x)  # shape = [*, width, grid, grid]
-        logger.info("x conv1.shape:{}".format(x.shape))
+        # logger.info("x conv1.shape:{}".format(x.shape))
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
         x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        logger.info("x ln_pre.shape:{}".format(x.shape))
+        # logger.info("x ln_pre.shape:{}".format(x.shape))
         x = self.transformer(x, video_frame=video_frame)
         x = x.permute(1, 0, 2)  # LND -> NLD
-        logger.info("x transformer.shape:{}".format(x.shape))
+        # logger.info("x transformer.shape:{}".format(x.shape))
 
         # Move the three lines below to `encode_image` for entire hidden sequence
         # x = self.ln_post(x[:, 0, :])

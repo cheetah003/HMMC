@@ -63,6 +63,9 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--hard_negative_rate', type=float, default=0.5, help='rate of intra negative sample')
     parser.add_argument('--negative_weighting', type=int, default=1, help='Weight the loss for intra negative')
     parser.add_argument('--n_pair', type=int, default=1, help='Num of pair to output from data loader')
+    parser.add_argument('--contrast_num_negative', type=int, default=4096, help='Num of negative sample in queue')
+    parser.add_argument('--contrast_momentum', type=float, default=0.99, help='momentum')
+    parser.add_argument('--contrast_temperature', type=float, default=0.2, help='temperature')
 
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
@@ -116,7 +119,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="choice a similarity header.")
     parser.add_argument('--stage', type=str, default="stage1",choices=["stage1", "stage2"],
                         help="choose pretrain stage.")
-
+    parser.add_argument('--train_length', type=int, default=0, help="length of train dateset ")
     args = parser.parse_args()
 
     # Check paramenters
@@ -520,7 +523,9 @@ def main():
     # pretrained = "nghuyong/ernie-1.0"
     logger.info("tokenizer:{}".format(pretrained))
     tokenizer = BertTokenizer.from_pretrained(pretrained)
-
+    if args.do_pretrain:
+        train_dataloader, train_length, train_sampler = dataloader_bird_pretrain(args, tokenizer)
+        args.train_length = train_length
     model = init_model(args, device, n_gpu, args.local_rank)
     ## ####################################
     # freeze testing
@@ -558,7 +563,7 @@ def main():
         logger.info("  Num steps = %d", len(test_dataloader))
 
     if args.do_pretrain:
-        train_dataloader, train_length, train_sampler = dataloader_bird_pretrain(args, tokenizer)
+        # train_dataloader, train_length, train_sampler = dataloader_bird_pretrain(args, tokenizer)
         num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
                                         / args.gradient_accumulation_steps) * args.epochs
         # logger.info("train_dataloader len = {}".format(len(train_dataloader)))

@@ -63,6 +63,9 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--hard_negative_rate', type=float, default=0.5, help='rate of intra negative sample')
     parser.add_argument('--negative_weighting', type=int, default=1, help='Weight the loss for intra negative')
     parser.add_argument('--n_pair', type=int, default=1, help='Num of pair to output from data loader')
+    parser.add_argument('--contrast_num_negative', type=int, default=4096, help='Num of negative sample in queue')
+    parser.add_argument('--contrast_momentum', type=float, default=0.99, help='momentum')
+    parser.add_argument('--contrast_temperature', type=float, default=0.2, help='temperature')
 
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
@@ -116,6 +119,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="choice a similarity header.")
     parser.add_argument('--stage', type=str, default="stage1",choices=["stage1", "stage1"],
                         help="choose pretrain stage.")
+    parser.add_argument('--train_length', type=int, default=0, help="length of train dateset ")
 
     args = parser.parse_args()
 

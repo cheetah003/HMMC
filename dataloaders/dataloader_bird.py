@@ -85,30 +85,6 @@ class dataload_bird_pretrain(VisionDataset):
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
-    def _mask_tokens(self, words):
-        token_labels = []
-        masked_tokens = words.copy()
-
-        for token_id, token in enumerate(masked_tokens):
-            if token_id == 0 or token_id == len(masked_tokens) - 1:
-                token_labels.append(-1)
-                continue
-            prob = random.random()
-            if prob < 0.15:
-                prob /= 0.15
-                if prob < 0.8:
-                    masked_tokens[token_id] = "[MASK]"
-                elif prob < 0.9:
-                    masked_tokens[token_id] = random.choice(list(self.tokenizer.vocab.items()))[0]
-                try:
-                    token_labels.append(self.tokenizer.vocab[token])
-                except KeyError:
-                    token_labels.append(self.tokenizer.vocab["[UNK]"])
-            else:
-                token_labels.append(-1)
-
-        return masked_tokens, token_labels
-
     def _get_text(self, caption=None):
         words = self.tokenizer.tokenize(caption)
         words = [self.SPECIAL_TOKEN["CLS_TOKEN"]] + words
@@ -250,30 +226,6 @@ class dataload_bird_train(VisionDataset):
         self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 500, subdir=True, readonly=True, readahead=False,
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
-
-    def _mask_tokens(self, words):
-        token_labels = []
-        masked_tokens = words.copy()
-
-        for token_id, token in enumerate(masked_tokens):
-            if token_id == 0 or token_id == len(masked_tokens) - 1:
-                token_labels.append(-1)
-                continue
-            prob = random.random()
-            if prob < 0.15:
-                prob /= 0.15
-                if prob < 0.8:
-                    masked_tokens[token_id] = "[MASK]"
-                elif prob < 0.9:
-                    masked_tokens[token_id] = random.choice(list(self.tokenizer.vocab.items()))[0]
-                try:
-                    token_labels.append(self.tokenizer.vocab[token])
-                except KeyError:
-                    token_labels.append(self.tokenizer.vocab["[UNK]"])
-            else:
-                token_labels.append(-1)
-
-        return masked_tokens, token_labels
 
     def _get_text(self, caption=None):
         words = self.tokenizer.tokenize(caption)
@@ -422,30 +374,6 @@ class dataload_bird_val(VisionDataset):
         self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 500, subdir=True, readonly=True, readahead=False,
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
-
-    def _mask_tokens(self, words):
-        token_labels = []
-        masked_tokens = words.copy()
-
-        for token_id, token in enumerate(masked_tokens):
-            if token_id == 0 or token_id == len(masked_tokens) - 1:
-                token_labels.append(-1)
-                continue
-            prob = random.random()
-            if prob < 0.15:
-                prob /= 0.15
-                if prob < 0.8:
-                    masked_tokens[token_id] = "[MASK]"
-                elif prob < 0.9:
-                    masked_tokens[token_id] = random.choice(list(self.tokenizer.vocab.items()))[0]
-                try:
-                    token_labels.append(self.tokenizer.vocab[token])
-                except KeyError:
-                    token_labels.append(self.tokenizer.vocab["[UNK]"])
-            else:
-                token_labels.append(-1)
-
-        return masked_tokens, token_labels
 
     def _get_pos_pair(self, item=None):
         query = item['query']
