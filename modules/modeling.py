@@ -72,7 +72,7 @@ class CLIP4ClipPreTrainedModel(PreTrainedModel, nn.Module):
         # clip_state_dict = CLIP.get_config(pretrained_clip_name="RN50x64")
 
         for key, val in clip_state_dict.items():
-            logger.info("key:{}".format(key))
+            # logger.info("key:{}".format(key))
             new_key = "clip." + key
             new_key_k = "clip_k." + key
             if new_key not in state_dict:
@@ -108,6 +108,17 @@ class CLIP4ClipPreTrainedModel(PreTrainedModel, nn.Module):
 
         if state_dict is not None:
             model = cls.init_preweight(model, state_dict, task_config=task_config)
+
+        # for momentum initialize
+        for param_q, param_k in zip(model.clip.parameters(), model.clip_k.parameters()):
+            param_k.data.copy_(param_q.data)  # initialize
+            param_k.requires_grad = False  # not update by gradient
+        for param_q, param_k in zip(model.chinese_bert.parameters(), model.chinese_bert_k.parameters()):
+            param_k.data.copy_(param_q.data)  # initialize
+            param_k.requires_grad = False  # not update by gradient
+        for param_q, param_k in zip(model.co_attention_model.parameters(), model.co_attention_model_k.parameters()):
+            param_k.data.copy_(param_q.data)  # initialize
+            param_k.requires_grad = False  # not update by gradient
 
         return model
 
@@ -157,25 +168,15 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
         self.chinese_bert = AutoModel.from_pretrained(pretrained)
         self.chinese_bert_k = AutoModel.from_pretrained(pretrained)
-        for param_q, param_k in zip(self.chinese_bert.parameters(), self.chinese_bert_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
         ################### End of albert text Encoder
         self.cls = BertLMPredictionHead(t_config)
         ################## begin of co_attention_model
         self.co_attention_model = co_attention_model()
         self.co_attention_model_k = co_attention_model()
-        for param_q, param_k in zip(self.co_attention_model.parameters(), self.co_attention_model_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
         ################## end of co_attention_model
         # CLIP Encoders: From OpenAI: CLIP [https://github.com/openai/CLIP] ===>
-
         self.clip = build_model(clip_state_dict, local_rank=task_config.local_rank, embed_dim=t_config.hidden_size)
         self.clip_k = build_model(clip_state_dict, local_rank=task_config.local_rank, embed_dim=t_config.hidden_size)
-        for param_q, param_k in zip(self.clip.parameters(), self.clip_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
         ################## swin transformer
         '''
         enc = partial(
@@ -208,11 +209,10 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                                      heads=t_config.hidden_size // 64)
 
         ################## create queue
-        self.K = int(
-            self.task_config.train_length * 1. / dist.get_world_size() / self.task_config.batch_size) * self.task_config.epochs
-        self.k = int(
-            self.task_config.train_length * 1. / dist.get_world_size() / self.task_config.batch_size) * 0
+        self.K = int(self.task_config.train_length * 1. / self.task_config.batch_size) * self.task_config.epochs
+        self.k = int(self.task_config.train_length * 1. / self.task_config.batch_size) * 0
 
+        logger.info("train_len:{},self.K:{},self.k:{}".format(self.task_config.train_length, self.K, self.k))
         self.register_buffer("queue_video_in", torch.randn(768, self.contrast_num_negative))
         self.register_buffer("queue_tag_in", torch.randn(768, self.contrast_num_negative))
         self.register_buffer("queue_title_in", torch.randn(768, self.contrast_num_negative))
@@ -220,6 +220,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.register_buffer("queue_co_tag", torch.randn(768, self.contrast_num_negative))
         self.register_buffer("queue_co_title", torch.randn(768, self.contrast_num_negative))
         self.register_buffer("queue_co_video_title", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_co_query", torch.randn(768, self.contrast_num_negative))
         self.queue_video_in = F.normalize(self.queue_video_in, dim=0)
         self.queue_tag_in = F.normalize(self.queue_tag_in, dim=0)
         self.queue_title_in = F.normalize(self.queue_title_in, dim=0)
@@ -227,6 +228,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.queue_co_tag = F.normalize(self.queue_co_tag, dim=0)
         self.queue_co_title = F.normalize(self.queue_co_title, dim=0)
         self.queue_co_video_title = F.normalize(self.queue_co_video_title, dim=0)
+        self.queue_co_query = F.normalize(self.queue_co_query, dim=0)
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
@@ -235,153 +237,6 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.loss_fct_dual = Dual_CrossEn()
 
         self.apply(self.init_weights)
-
-    def forward(self, video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask):
-
-        tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
-        video_mask = video_mask.view(-1, video_mask.shape[-1])
-        tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
-        title_ids = title_ids.view(-1, title_ids.shape[-1])
-        title_mask = title_mask.view(-1, title_mask.shape[-1])
-        # T x 3 x H x W
-        video = torch.as_tensor(video_data).float()
-        b, pair, bs, ts, channel, h, w = video.shape
-        video = video.view(b * pair * bs * ts, channel, h, w)
-        video_frame = bs * ts
-
-        # logger.info("input_ids.shape:{}".format(input_ids.shape))
-        logger.info("video.shape:{}".format(video.shape))
-        # logger.info("sequence_output.shape:{}".format(sequence_output.shape))
-        # logger.info("visual_output.shape:{}".format(visual_output.shape))
-        # logger.info("masked_title.shape:{}".format(masked_title.shape))
-        if self.training:
-            loss = 0.
-            if self.task_config.stage == "stage1":
-                video_in = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame)
-                video_in_mpool = torch.sum(video_in, dim=1) / video_in.size(1)
-                tag_in = self.get_sequence_output(tag_ids, tag_mask, shaped=True)
-                title_in = self.get_sequence_output(title_ids, title_mask, shaped=True)
-                if self.rank == 0:
-                    logger.info("video_in.shape:{}".format(video_in.shape))
-                    logger.info("title_in.shape:{}".format(title_in.shape))
-                _, co_video_output = self.co_attention_model(video_in, video_in)
-                co_video_output = torch.sum(co_video_output, dim=1) / video_in.size(1)
-                co_tag_output, _ = self.co_attention_model(tag_in, tag_in)
-                co_title_output, _ = self.co_attention_model(title_in, title_in)
-                _, co_video_title_output = self.co_attention_model(title_in, video_in)
-                co_video_title_output = torch.sum(co_video_title_output, dim=1) / video_in.size(1)
-                # compute key features
-                with torch.no_grad():  # no gradient to keys
-                    self._momentum_update_key_encoder()  # update the key encoder
-                    video_in_k = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame,
-                                                        is_momentum=True)
-                    video_in_mpool_k = torch.sum(video_in_k, dim=1) / video_in_k.size(1)
-                    tag_in_k = self.get_sequence_output(tag_ids, tag_mask, shaped=True, is_momentum=True)
-                    title_in_k = self.get_sequence_output(title_ids, title_mask, shaped=True, is_momentum=True)
-                    _, co_video_output_k = self.co_attention_model(video_in_k, video_in_k)
-                    co_video_output_k = torch.sum(co_video_output_k, dim=1) / video_in.size(1)
-                    co_tag_output_k, _ = self.co_attention_model(tag_in_k, tag_in_k)
-                    co_title_output_k, _ = self.co_attention_model(title_in_k, title_in_k)
-                    _, co_video_title_output_k = self.co_attention_model(title_in_k, video_in_k)
-                    co_video_title_output_k = torch.sum(co_video_title_output_k, dim=1) / video_in.size(1)
-
-                # compute contrastive loss
-                # video_in - tag_in
-                logger.info("video_in_mpool.dtype:{},tag_in_k.dtype:{},tag_in.dtype:{}".format(video_in_mpool.dtype,
-                                                                                        tag_in_k.dtype, tag_in.dtype))
-                video_tag_in_loss = self.contrastive_loss(video_in_mpool, tag_in_k, self.queue_tag_in) \
-                                    + self.contrastive_loss(tag_in, video_in_mpool_k, self.queue_video_in)
-                loss += video_tag_in_loss
-                # video_in - title_in
-                video_title_in_loss = self.contrastive_loss(video_in_mpool, title_in_k, self.queue_title_in) \
-                                      + self.contrastive_loss(title_in, video_in_mpool_k, self.queue_video_in)
-                loss += video_title_in_loss
-                # video - tag
-                video_tag_loss = self.contrastive_loss(co_video_output, co_tag_output_k, self.queue_co_tag) \
-                                 + self.contrastive_loss(co_tag_output, co_video_output_k, self.queue_co_video)
-                loss += video_tag_loss
-                # video - title
-                video_title_loss = self.contrastive_loss(co_video_output, co_title_output_k, self.queue_co_title) \
-                                   + self.contrastive_loss(co_title_output, co_video_output_k, self.queue_co_video)
-                loss += video_title_loss
-                # (video + title) - tag
-                video_title_tag_loss = self.contrastive_loss(co_video_title_output, co_tag_output_k, self.queue_co_tag) \
-                                       + self.contrastive_loss(co_tag_output, co_video_title_output_k,
-                                                               self.queue_co_video_title)
-                loss += video_title_tag_loss
-
-                self._dequeue_and_enqueue(video_in_mpool_k, tag_in_k, title_in_k, co_video_output_k, co_tag_output_k,
-                                          co_title_output_k, co_video_title_output_k)
-
-                # for MLM
-                to_mask_tag_ids = tag_ids.clone()
-                tag_labels = to_mask_tag_ids.clone()
-                to_mask_title_ids = title_ids.clone()
-                title_labels = to_mask_title_ids.clone()
-
-                tag_probability_matrix = torch.full(tag_labels.shape, self.mlm_probability)
-                masked_tag_ids, tag_label = self.mask(to_mask_tag_ids, self.tokenizer.vocab_size,
-                                                      video.device, targets=tag_labels,
-                                                      probability_matrix=tag_probability_matrix)
-                title_probability_matrix = torch.full(title_labels.shape, self.mlm_probability)
-                masked_title_ids, title_label = self.mask(to_mask_title_ids, self.tokenizer.vocab_size,
-                                                          video.device, targets=title_labels,
-                                                          probability_matrix=title_probability_matrix)
-
-                masked_tag_output = self.get_sequence_output(masked_tag_ids, tag_mask, return_hidden=True, shaped=True)
-                masked_title_output = self.get_sequence_output(masked_title_ids, title_mask, return_hidden=True,
-                                                               shaped=True)
-
-                co_masked_tag_output, _ = self.co_attention_model(masked_tag_output, video_in)
-                co_masked_title_output, _ = self.co_attention_model(masked_title_output, video_in)
-
-                mlm_tag_loss = self.calculate_mlm_loss(masked_tag_output, tag_labels)
-                loss += mlm_tag_loss
-                mlm_co_tag_loss = self.calculate_mlm_loss(co_masked_tag_output, tag_labels)
-                loss += mlm_co_tag_loss
-                mlm_title_loss = self.calculate_mlm_loss(masked_title_output, title_labels)
-                loss += mlm_title_loss
-                mlm_co_title_loss = self.calculate_mlm_loss(co_masked_title_output, title_labels)
-                loss += mlm_co_title_loss
-                logger.info("mlm_tag_loss:{},mlm_co_tag_loss:{}".format(mlm_tag_loss, mlm_co_tag_loss))
-                logger.info("mlm_title_loss:{}, mlm_co_title_loss:{}".format(mlm_title_loss, mlm_co_title_loss))
-                return loss
-            elif self.task_config.stage == "stage2":
-                # add MMM and VTM
-                visual_output = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame)
-                tag_label_output = self.get_sequence_output(tag_ids, tag_mask, shaped=True)
-                title_output = self.get_sequence_output(title_ids, title_mask, shaped=True)
-
-                # get tag feature from video
-                extended_video_mask = (1.0 - video_mask.unsqueeze(1)) * -1000000.0
-                extended_video_mask = extended_video_mask.expand(-1, video_mask.size(1), -1)
-                logger.info("visual_output.shape:{}".format(visual_output.shape))
-                logger.info("video_mask.shape:{}".format(video_mask.shape))
-                logger.info("extended_video_mask.shape:{}".format(extended_video_mask.shape))
-                visual_output_temp = visual_output.permute(1, 0, 2)
-                video_tag_output = self.tag_model(visual_output_temp, extended_video_mask)
-                video_tag_output = video_tag_output.permute(1, 0, 2)
-                logger.info("video_tag_output.shape:{}".format(video_tag_output.shape))
-
-                # fusion tag feature and video feature
-                _, co_visual_output = self.co_attention_model(video_tag_output, visual_output)
-
-                # (video, video_tag) - title loss
-                sim_matrix = self.get_similarity_logits(title_output, co_visual_output)
-                sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-                loss += sim_loss
-                logger.info("sim_loss:{}".format(sim_loss))
-                # video_tag - tag_label loss
-                tag_loss = (tag_label_output - video_tag_output) ** 2
-                tag_loss = tag_loss.mean(dim=-1)
-                tag_loss = tag_loss.mean(dim=-1)
-                logger.info("tag_loss.shape:{}".format(tag_loss.shape))
-                tag_loss = tag_loss.sum()
-                logger.info("tag_loss.sum:{}".format(tag_loss))
-                loss += tag_loss
-                return loss
-        else:
-            return None
 
     def calculate_mlm_loss(self, sequence_output_mlm, labels):
         mlm_scores = self.cls(sequence_output_mlm)
@@ -458,6 +313,18 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
         return visual_hidden
 
+    def get_tag_output(self, visual_output, video_mask, shaped=False):
+        if shaped is False:
+            video_mask = video_mask.view(-1, video_mask.shape[-1])
+        extended_video_mask = (1.0 - video_mask.unsqueeze(1)) * -1000000.0
+        extended_video_mask = extended_video_mask.expand(-1, video_mask.size(1), -1)
+        visual_output_temp = visual_output.permute(1, 0, 2)
+        video_tag_output = self.tag_model(visual_output_temp, extended_video_mask)
+        video_tag_output = video_tag_output.permute(1, 0, 2)
+        # video_tag_output = torch.sum(video_tag_output, dim=1) / video_tag_output.size(1)
+
+        return video_tag_output
+
     def mean_pooling_for_similarity_sequence(self, sequence_output, attention_mask):
         attention_mask_un = attention_mask.to(dtype=torch.float).unsqueeze(-1)
         attention_mask_un[:, 0, :] = 0.
@@ -507,8 +374,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
         visual_output = visual_output.squeeze(1)
         visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
-        visual_output = self.mean_pooling_for_similarity_visual(visual_output)
-        visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
+        # visual_output = self.mean_pooling_for_similarity_visual(visual_output)
+        # visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
 
         sequence_output = sequence_output.squeeze(1)
         sequence_output = sequence_output / sequence_output.norm(dim=-1, keepdim=True)
@@ -545,39 +412,48 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             param_k.data = param_k.data * _contrast_momentum + param_q.data * (1. - _contrast_momentum)
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self, video_in_k, tag_in_k, title_in_k, co_video_output_k, co_tag_output_k,
-                             co_title_output_k, co_video_title_output_k):
-        # gather keys before updating queue
-        video_in_k = dist_collect(video_in_k).squeeze(1)
-        tag_in_k = dist_collect(tag_in_k).squeeze(1)
-        title_in_k = dist_collect(title_in_k).squeeze(1)
-        co_video_output_k = dist_collect(co_video_output_k).squeeze(1)
-        co_tag_output_k = dist_collect(co_tag_output_k).squeeze(1)
-        co_title_output_k = dist_collect(co_title_output_k).squeeze(1)
-        co_video_title_output_k = dist_collect(co_video_title_output_k).squeeze(1)
-
-        batch_size = video_in_k.shape[0]
-
+    def _dequeue_and_enqueue(self, video_in_k=None, tag_in_k=None, title_in_k=None, co_video_output_k=None,
+                             co_tag_output_k=None, co_title_output_k=None, co_video_title_output_k=None,
+                             co_query_output_k=None):
+        batch_size = self.task_config.batch_size
         ptr = int(self.queue_ptr)
         assert self.contrast_num_negative % batch_size == 0  # for simplicity
-        print("keys1.shape:{}".format(video_in_k.shape))
-        # replace the keys at ptr (dequeue and enqueue)
-        self.queue_video_in[:, ptr:ptr + batch_size] = video_in_k.T
-        self.queue_tag_in[:, ptr:ptr + batch_size] = tag_in_k.T
-        self.queue_title_in[:, ptr:ptr + batch_size] = title_in_k.T
-        self.queue_co_video[:, ptr:ptr + batch_size] = co_video_output_k.T
-        self.queue_co_tag[:, ptr:ptr + batch_size] = co_tag_output_k.T
-        self.queue_co_title[:, ptr:ptr + batch_size] = co_title_output_k.T
-        self.queue_co_video_title[:, ptr:ptr + batch_size] = co_video_title_output_k.T
-        ptr = (ptr + batch_size) % self.contrast_num_negative  # move pointer
 
+        if video_in_k is not None:
+            # gather keys before updating queue
+            video_in_k = dist_collect(video_in_k).squeeze(1)
+            # replace the keys at ptr (dequeue and enqueue)
+            self.queue_video_in[:, ptr:ptr + batch_size] = video_in_k.T
+        if tag_in_k is not None:
+            tag_in_k = dist_collect(tag_in_k).squeeze(1)
+            self.queue_tag_in[:, ptr:ptr + batch_size] = tag_in_k.T
+        if title_in_k is not None:
+            title_in_k = dist_collect(title_in_k).squeeze(1)
+            self.queue_title_in[:, ptr:ptr + batch_size] = title_in_k.T
+        if co_video_output_k is not None:
+            co_video_output_k = dist_collect(co_video_output_k).squeeze(1)
+            self.queue_co_video[:, ptr:ptr + batch_size] = co_video_output_k.T
+        if co_tag_output_k is not None:
+            co_tag_output_k = dist_collect(co_tag_output_k).squeeze(1)
+            self.queue_co_tag[:, ptr:ptr + batch_size] = co_tag_output_k.T
+        if co_title_output_k is not None:
+            co_title_output_k = dist_collect(co_title_output_k).squeeze(1)
+            self.queue_co_title[:, ptr:ptr + batch_size] = co_title_output_k.T
+        if co_video_title_output_k is not None:
+            co_video_title_output_k = dist_collect(co_video_title_output_k).squeeze(1)
+            self.queue_co_video_title[:, ptr:ptr + batch_size] = co_video_title_output_k.T
+        if co_query_output_k is not None:
+            co_query_output_k = dist_collect(co_query_output_k).squeeze(1)
+            self.queue_co_query[:, ptr:ptr + batch_size] = co_query_output_k.T
+
+        ptr = (ptr + batch_size) % self.contrast_num_negative  # move pointer
         self.queue_ptr[0] = ptr
 
     def contrastive_loss(self, q, k, queue):
 
         q = q.squeeze(1)
         k = k.squeeze(1)
-        logger.info("q.dtype:{},k.dtype:{}".format(q.dtype, k.dtype))
+        # logger.info("q.dtype:{},k.dtype:{}".format(q.dtype, k.dtype))
         # positive logits: Nx1
         # l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
         l_pos = torch.matmul(q, k.T)
@@ -595,10 +471,155 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
         return F.cross_entropy(logits, labels)
 
+    def forward(self, video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask):
+
+        tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
+        video_mask = video_mask.view(-1, video_mask.shape[-1])
+        tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
+        title_ids = title_ids.view(-1, title_ids.shape[-1])
+        title_mask = title_mask.view(-1, title_mask.shape[-1])
+        # T x 3 x H x W
+        video = torch.as_tensor(video_data)
+        b, pair, bs, ts, channel, h, w = video.shape
+        video = video.view(b * pair * bs * ts, channel, h, w)
+        video_frame = bs * ts
+
+        # logger.info("input_ids.shape:{}".format(input_ids.shape))
+        logger.info("video.shape:{}".format(video.shape))
+        # logger.info("sequence_output.shape:{}".format(sequence_output.shape))
+        # logger.info("visual_output.shape:{}".format(visual_output.shape))
+        # logger.info("masked_title.shape:{}".format(masked_title.shape))
+        if self.training:
+            loss = 0.
+            if self.task_config.stage == "stage1":
+                video_in = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame)
+                video_in_mpool = torch.sum(video_in, dim=1) / video_in.size(1)
+                tag_in = self.get_sequence_output(tag_ids, tag_mask, shaped=True)
+                title_in = self.get_sequence_output(title_ids, title_mask, shaped=True)
+                if self.rank == 0:
+                    logger.info("video_in.shape:{}".format(video_in.shape))
+                    logger.info("title_in.shape:{}".format(title_in.shape))
+                _, co_video_output = self.co_attention_model(video_in, video_in)
+                co_video_output = torch.sum(co_video_output, dim=1) / video_in.size(1)
+                co_tag_output, _ = self.co_attention_model(tag_in, tag_in)
+                co_title_output, _ = self.co_attention_model(title_in, title_in)
+                _, co_video_title_output = self.co_attention_model(title_in, video_in)
+                co_video_title_output = torch.sum(co_video_title_output, dim=1) / video_in.size(1)
+                # compute key features
+                with torch.no_grad():  # no gradient to keys
+                    self._momentum_update_key_encoder()  # update the key encoder
+                    video_in_k = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame,
+                                                        is_momentum=True)
+                    video_in_mpool_k = torch.sum(video_in_k, dim=1) / video_in_k.size(1)
+                    tag_in_k = self.get_sequence_output(tag_ids, tag_mask, shaped=True, is_momentum=True)
+                    title_in_k = self.get_sequence_output(title_ids, title_mask, shaped=True, is_momentum=True)
+                    _, co_video_output_k = self.co_attention_model_k(video_in_k, video_in_k)
+                    co_video_output_k = torch.sum(co_video_output_k, dim=1) / co_video_output_k.size(1)
+                    co_tag_output_k, _ = self.co_attention_model_k(tag_in_k, tag_in_k)
+                    co_title_output_k, _ = self.co_attention_model_k(title_in_k, title_in_k)
+                    _, co_video_title_output_k = self.co_attention_model_k(title_in_k, video_in_k)
+                    co_video_title_output_k = torch.sum(co_video_title_output_k, dim=1) / co_video_title_output_k.size(1)
+
+                # compute contrastive loss
+                # video_in - tag_in
+                logger.info("video_in_mpool.dtype:{},tag_in_k.dtype:{},tag_in.dtype:{}".format(video_in_mpool.dtype,
+                                                                                        tag_in_k.dtype, tag_in.dtype))
+                video_tag_in_loss = self.contrastive_loss(video_in_mpool, tag_in_k, self.queue_tag_in) \
+                                    + self.contrastive_loss(tag_in, video_in_mpool_k, self.queue_video_in)
+                loss += video_tag_in_loss
+                # video_in - title_in
+                video_title_in_loss = self.contrastive_loss(video_in_mpool, title_in_k, self.queue_title_in) \
+                                      + self.contrastive_loss(title_in, video_in_mpool_k, self.queue_video_in)
+                loss += video_title_in_loss
+                # video - tag
+                video_tag_loss = self.contrastive_loss(co_video_output, co_tag_output_k, self.queue_co_tag) \
+                                 + self.contrastive_loss(co_tag_output, co_video_output_k, self.queue_co_video)
+                loss += video_tag_loss
+                # video - title
+                video_title_loss = self.contrastive_loss(co_video_output, co_title_output_k, self.queue_co_title) \
+                                   + self.contrastive_loss(co_title_output, co_video_output_k, self.queue_co_video)
+                loss += video_title_loss
+                # (video + title) - tag
+                video_title_tag_loss = self.contrastive_loss(co_video_title_output, co_tag_output_k, self.queue_co_tag) \
+                                       + self.contrastive_loss(co_tag_output, co_video_title_output_k,
+                                                               self.queue_co_video_title)
+                loss += video_title_tag_loss
+
+                self._dequeue_and_enqueue(video_in_mpool_k, tag_in_k, title_in_k, co_video_output_k, co_tag_output_k,
+                                          co_title_output_k, co_video_title_output_k)
+
+                # for MLM
+                to_mask_tag_ids = tag_ids.clone()
+                tag_labels = to_mask_tag_ids.clone()
+                to_mask_title_ids = title_ids.clone()
+                title_labels = to_mask_title_ids.clone()
+
+                tag_probability_matrix = torch.full(tag_labels.shape, self.mlm_probability)
+                masked_tag_ids, tag_label = self.mask(to_mask_tag_ids, self.tokenizer.vocab_size,
+                                                      video.device, targets=tag_labels,
+                                                      probability_matrix=tag_probability_matrix)
+                title_probability_matrix = torch.full(title_labels.shape, self.mlm_probability)
+                masked_title_ids, title_label = self.mask(to_mask_title_ids, self.tokenizer.vocab_size,
+                                                          video.device, targets=title_labels,
+                                                          probability_matrix=title_probability_matrix)
+
+                masked_tag_output = self.get_sequence_output(masked_tag_ids, tag_mask, return_hidden=True, shaped=True)
+                masked_title_output = self.get_sequence_output(masked_title_ids, title_mask, return_hidden=True,
+                                                               shaped=True)
+
+                co_masked_tag_output, _ = self.co_attention_model(masked_tag_output, video_in)
+                co_masked_title_output, _ = self.co_attention_model(masked_title_output, video_in)
+
+                mlm_tag_loss = self.calculate_mlm_loss(masked_tag_output, tag_labels)
+                loss += mlm_tag_loss
+                mlm_co_tag_loss = self.calculate_mlm_loss(co_masked_tag_output, tag_labels)
+                loss += mlm_co_tag_loss
+                mlm_title_loss = self.calculate_mlm_loss(masked_title_output, title_labels)
+                loss += mlm_title_loss
+                mlm_co_title_loss = self.calculate_mlm_loss(co_masked_title_output, title_labels)
+                loss += mlm_co_title_loss
+                logger.info("mlm_tag_loss:{},mlm_co_tag_loss:{}".format(mlm_tag_loss, mlm_co_tag_loss))
+                logger.info("mlm_title_loss:{}, mlm_co_title_loss:{}".format(mlm_title_loss, mlm_co_title_loss))
+                return loss
+            elif self.task_config.stage == "stage2":
+                # add MMM and VTM
+                video_output = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame)
+                tag_label_output = self.get_sequence_output(tag_ids, tag_mask, shaped=True)
+                title_output = self.get_sequence_output(title_ids, title_mask, shaped=True)
+                co_title_output, _ = self.co_attention_model(title_output, title_output)
+                video_tag_output = self.get_tag_output(video_output, video_mask)
+                _, co_video_tag_output = self.co_attention_model(video_tag_output, video_output)
+
+                logger.info("video_output.shape:{}".format(video_output.shape))
+                logger.info("video_mask.shape:{}".format(video_mask.shape))
+                # video_tag - tag_label loss
+                tag_label_output = tag_label_output.squeeze()
+                # (batch, frames, hidden)
+                video_tag_output = torch.sum(video_tag_output, dim=1) / video_tag_output.size(1)
+                # (batch, hidden)
+                logger.info("video_tag_output.shape:{}".format(video_tag_output.shape))
+                # (batch, hidden)
+                logger.info("tag_label_output.shape:{}".format(tag_label_output.shape))
+                tag_loss = (tag_label_output - video_tag_output) ** 2
+                tag_loss = tag_loss.mean(dim=-1)
+                # logger.info("tag_loss.shape:{}".format(tag_loss.shape))
+                tag_loss = tag_loss.sum()
+                logger.info("tag_loss.sum:{}".format(tag_loss))
+                loss += tag_loss
+                # (video, video_tag) - title loss
+                co_video_tag_output = torch.sum(co_video_tag_output, dim=1) / co_video_tag_output.size(1)
+                sim_matrix = self.get_similarity_logits(co_title_output, co_video_tag_output)
+                sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+                loss += sim_loss
+                logger.info("sim_loss:{}".format(sim_loss))
+
+                return loss
+        else:
+            return None
 
 class BirdModel(BirdPreTrainedModel):
     def forward(self, query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-                pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask):
+                pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank):
         query_ids = query_ids.view(-1, query_ids.shape[-1])
 
         query_mask = query_mask.view(-1, query_mask.shape[-1])
@@ -610,53 +631,80 @@ class BirdModel(BirdPreTrainedModel):
         hard_video_mask = hard_video_mask.view(-1, hard_video_mask.shape[-1])
 
         # T x 3 x H x W
-        pos_video = torch.as_tensor(pos_video_data).float()
-        hard_video = torch.as_tensor(hard_video_data).float()
+        pos_video = torch.as_tensor(pos_video_data)
+        hard_video = torch.as_tensor(hard_video_data)
         b, pair, bs, ts, channel, h, w = pos_video.shape
         pos_video = pos_video.view(b * pair * bs * ts, channel, h, w)
         hard_video = hard_video.view(b * pair * bs * ts, channel, h, w)
         video_frame = bs * ts
         if self.training:
             loss = 0.0
-            query_output = self.get_sequence_output(query_ids, query_mask, return_hidden=False, shaped=True)
+            query_output = self.get_sequence_output(query_ids, query_mask, shaped=True)
+            co_query_output, _ = self.co_attention_model(query_output, query_output)
             pos_visual_output = self.get_visual_output(pos_video, pos_video_mask, shaped=True, video_frame=video_frame)
             hard_visual_output = self.get_visual_output(hard_video, hard_video_mask, shaped=True,
                                                         video_frame=video_frame)
             pos_title_output = self.get_sequence_output(pos_title_ids, pos_title_mask, shaped=True)
             hard_title_output = self.get_sequence_output(hard_title_ids, hard_title_mask, shaped=True)
-            if self.rank == 0:
-                logger.info("pos_title_output.shape:{}".format(pos_title_output.shape))
-                logger.info("pos_visual_output.shape:{}".format(pos_visual_output.shape))
             # _, pooled_output = self.get_cross_output(video_fea=visual_output, text_fea=title_output)
-
-            _, pos_co_visual_output = self.co_attention_model(pos_title_output, pos_visual_output)
+            if self.task_config.use_tag:
+                pos_tag_output = self.get_tag_output(pos_visual_output, pos_video_mask, shaped=True)
+                pos_tag_output = torch.sum(pos_tag_output, dim=1, keepdim=True) / pos_tag_output.size(1)
+                hard_tag_output = self.get_tag_output(hard_visual_output, hard_video_mask, shaped=True)
+                hard_tag_output = torch.sum(hard_tag_output, dim=1, keepdim=True) / hard_tag_output.size(1)
+                pos_title_output = torch.cat([pos_title_output, pos_tag_output], dim=1)
+                hard_title_output = torch.cat([hard_title_output, hard_tag_output], dim=1)
+            # if self.rank == 0:
+                # logger.info("pos_title_output.shape:{}".format(pos_title_output.shape))
+                # logger.info("pos_visual_output.shape:{}".format(pos_visual_output.shape))
+            _, pos_co_video_title_output = self.co_attention_model(pos_title_output, pos_visual_output)
+            pos_co_video_title_output = torch.sum(pos_co_video_title_output, dim=1) / pos_co_video_title_output.size(1)
             _, hard_co_visual_output = self.co_attention_model(hard_title_output, hard_visual_output)
+            hard_co_visual_output = torch.sum(hard_co_visual_output, dim=1) / hard_co_visual_output.size(1)
 
-            # random negtive loss
-            sim_matrix = self.get_similarity_logits(query_output, pos_co_visual_output)
-            sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            loss += sim_loss
-            if self.rank == 0:
-                logger.info("sim_loss:{}".format(sim_loss))
-            # logger.info("sim_matrix:{}".format(sim_matrix))
+            with torch.no_grad():  # no gradient to keys
+                self._momentum_update_key_encoder()  # update the key encoder
+                query_in_k = self.get_sequence_output(query_ids, query_mask, shaped=True, is_momentum=True)
+                co_query_output_k, _ = self.co_attention_model_k(query_in_k, query_in_k)
+                pos_video_in_k = self.get_visual_output(pos_video, pos_video_mask, shaped=True, video_frame=video_frame,
+                                                    is_momentum=True)
+                pos_title_in_k = self.get_sequence_output(pos_title_ids, pos_title_mask, shaped=True, is_momentum=True)
+                _, pos_co_video_title_output_k = self.co_attention_model_k(pos_title_in_k, pos_video_in_k)
+                pos_co_video_title_output_k = torch.sum(pos_co_video_title_output_k, dim=1) / pos_co_video_title_output_k.size(1)
+
+            # (video + title) - tag # random negtive loss
+            video_title_tag_loss = self.contrastive_loss(pos_co_video_title_output, co_query_output_k, self.queue_co_query) \
+                                   + self.contrastive_loss(co_query_output, pos_co_video_title_output_k,
+                                                           self.queue_co_video_title)
+            loss += video_title_tag_loss
+
+            self._dequeue_and_enqueue(co_query_output_k=co_query_output_k, co_video_title_output_k=pos_co_video_title_output_k)
             # hard negtive loss
+            sim_matrix = self.get_similarity_logits(query_output, pos_co_video_title_output)
+            # logger.info("sim_matrix:{}".format(sim_matrix))
             single_positive_scores = torch.diagonal(sim_matrix, 0)
-            hard_doc_num = len(single_positive_scores)
-            positive_scores = single_positive_scores.reshape(-1, 1).repeat(1, hard_doc_num).reshape(-1)
             sim_matrix_hard = self.get_similarity_logits(query_output, hard_co_visual_output)
-            hard_batch_scores = sim_matrix_hard.reshape(-1)
-            hard_sim_matrix = torch.cat([positive_scores.unsqueeze(1),
-                                         hard_batch_scores.unsqueeze(1)], dim=1)
-
-            hard_lsm = F.log_softmax(hard_sim_matrix, dim=1)
+            # logger.info("sim_matrix_hard:{}".format(sim_matrix_hard))
+            single_hard_scores = torch.diagonal(sim_matrix_hard, 0)
+            hard_sim_matrix = torch.cat([single_positive_scores.unsqueeze(1),
+                                         single_hard_scores.unsqueeze(1)], dim=1)
             # logger.info("hard_sim_matrix:{}".format(hard_sim_matrix))
+            hard_lsm = F.log_softmax(hard_sim_matrix, dim=1)
+
             # logger.info("hard_lsm:{}".format(hard_lsm))
             hard_loss = -1.0 * hard_lsm[:, 0]
+            # logger.info("hard_loss:{}".format(hard_loss))
+            if self.task_config.use_rank:
+                hard_rank = dist_collect(hard_rank)
+                # logger.info("rank:{}".format(hard_rank))
+                hard_rank = hard_rank / self.task_config.max_rank
+                hard_loss = hard_loss * hard_rank
+            # logger.info("hard_loss:{}".format(hard_loss))
             hard_loss = hard_loss.mean()
             if self.rank == 0:
-                logger.info("hard_loss:{}".format(hard_loss))
+                logger.info("hard_loss_mean:{}".format(hard_loss))
+                logger.info("video_title_tag_loss:{}".format(video_title_tag_loss))
             loss += hard_loss
-
             # logger.info("hard_sim_matrix:{}".format(hard_sim_matrix))
             return loss
         else:

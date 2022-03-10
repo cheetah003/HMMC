@@ -326,10 +326,10 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
         if args.fp16_opt_level != "O0":
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
-                total_loss += float(scaled_loss)
+                loss = scaled_loss
         else:
             loss.backward()
-            total_loss += float(loss)
+        total_loss += float(loss)
         forward_and_backward_time = time.time()
         logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
         if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -411,6 +411,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             visual_output = model.get_visual_output(video, video_mask, shaped=False)
             title_output = model.get_sequence_output(title_ids, title_mask, shaped=False)
             _, visual_output = model.co_attention_model(title_output, visual_output)
+            visual_output = torch.sum(visual_output, dim=1) / visual_output.size(1)
             # co_sequence_output = co_sequence_output[:, 0, :]
             # co_sequence_output = co_sequence_output.view(co_sequence_output.size(0), -1, co_sequence_output.size(-1))
             #
@@ -508,6 +509,21 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
     return R1
 
 
+def freeze_stage2_model(model):
+    # freeze clip chinese_bert and co_attention_model
+    for param_q, param_k in zip(model.clip.parameters(), model.clip_k.parameters()):
+        # param_k.data.copy_(param_q.data)  # initialize
+        param_k.requires_grad = False  # not update by gradient
+        param_q.requires_grad = False
+    for param_q, param_k in zip(model.chinese_bert.parameters(), model.chinese_bert_k.parameters()):
+        # param_k.data.copy_(param_q.data)  # initialize
+        param_k.requires_grad = False  # not update by gradient
+        param_q.requires_grad = False
+    for param_q, param_k in zip(model.co_attention_model.parameters(), model.co_attention_model_k.parameters()):
+        # param_k.data.copy_(param_q.data)  # initialize
+        param_k.requires_grad = False  # not update by gradient
+        param_q.requires_grad = False
+
 
 def main():
     global logger
@@ -530,30 +546,12 @@ def main():
     ## ####################################
     # freeze testing
     ## ####################################
-    assert args.freeze_layer_num <= 12 and args.freeze_layer_num >= -1
-    if hasattr(model, "clip") and args.freeze_layer_num > -1:
-        for name, param in model.clip.named_parameters():
-            # top layers always need to train
-            if name.find("ln_final.") == 0 or name.find("text_projection") == 0 or name.find("logit_scale") == 0 \
-                    or name.find("visual.ln_post.") == 0 or name.find("visual.proj") == 0:
-                continue  # need to train
-            elif name.find("visual.transformer.resblocks.") == 0 or name.find("transformer.resblocks.") == 0:
-                layer_num = int(name.split(".resblocks.")[1].split(".")[0])
-                if layer_num >= args.freeze_layer_num:
-                    continue  # need to train
-
-            if args.linear_patch == "3d" and name.find("conv2."):
-                continue
-            else:
-                # paramenters which < freeze_layer_num will be freezed
-                param.requires_grad = False
-
     if args.stage == "stage2":
         #stage 2 need to freeze video/text encoder and co_attention model,only train tag model
-        for name, param in model.named_parameters():
-            if name.find("clip") != -1 or name.find("chinese_bert") != -1 or name.find("co_attention_model") != -1:
-                param.requires_grad = False
-            logger.info("name:{},param.requires_grad:{}".format(name, param.requires_grad))
+        freeze_stage2_model(model)
+        # for name, param in model.named_parameters():
+        #     logger.info("name:{},param.requires_grad:{}".format(name, param.requires_grad))
+
     test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
 
     if args.local_rank == 0:

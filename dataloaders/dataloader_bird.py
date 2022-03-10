@@ -14,6 +14,9 @@ from transformers import BertTokenizer
 from dataloaders.randaugment import RandomAugment
 from PIL import Image
 import cv2
+import logging
+
+logger = logging.getLogger(__name__)
 
 #global, number of frames in lmdb per video
 g_lmdb_frames = 24
@@ -81,7 +84,7 @@ class dataload_bird_pretrain(VisionDataset):
             self._env.close()
 
     def _initEnv(self):
-        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 8, subdir=True, readonly=True, readahead=False,
+        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 500, subdir=True, readonly=True, readahead=False,
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
@@ -314,7 +317,8 @@ class dataload_bird_train(VisionDataset):
         hard_video_data = self._get_video(hard_videoid)
         pos_title = pos_item['title']
         hard_title = hard_item['title']
-        # print("title[{}]:{}".format(index,title_text))
+        hard_rank = int(hard_item["rank"])
+        # logger.info("[{}]hard_rank:{}".format(index, hard_rank))
         # print("video[{}]:{}".format(index, item['video_id']))
         query_ids, query_mask, _ = self._get_text(query)
         pos_title_ids, pos_title_mask, _ = self._get_text(pos_title)
@@ -322,7 +326,7 @@ class dataload_bird_train(VisionDataset):
         pos_video_mask = np.ones(self.max_frames, dtype=np.long)
         hard_video_mask = np.ones(self.max_frames, dtype=np.long)
         return query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask
+               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank
 
     def __len__(self) -> int:
         return self._length

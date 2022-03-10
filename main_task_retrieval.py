@@ -4,7 +4,7 @@ from __future__ import unicode_literals
 from __future__ import print_function
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 from torch.utils.data import (SequentialSampler)
 import numpy as np
@@ -65,7 +65,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--n_pair', type=int, default=1, help='Num of pair to output from data loader')
     parser.add_argument('--contrast_num_negative', type=int, default=4096, help='Num of negative sample in queue')
     parser.add_argument('--contrast_momentum', type=float, default=0.99, help='momentum')
-    parser.add_argument('--contrast_temperature', type=float, default=0.2, help='temperature')
+    parser.add_argument('--contrast_temperature', type=float, default=10, help='temperature')
 
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
@@ -120,7 +120,9 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--stage', type=str, default="stage1",choices=["stage1", "stage1"],
                         help="choose pretrain stage.")
     parser.add_argument('--train_length', type=int, default=0, help="length of train dateset ")
-
+    parser.add_argument('--use_rank', type=bool, default=True, help="whether to use rank of hard_video ")
+    parser.add_argument('--use_tag', type=bool, default=True, help="whether to use tag model")
+    parser.add_argument('--max_rank', type=int, default=50, help="max rank for hard video")
     args = parser.parse_args()
 
     # Check paramenters
@@ -318,10 +320,10 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
         query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-        pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask = batch
+        pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank = batch
 
         loss = model(query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask)
+               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank)
 
         if n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
@@ -330,10 +332,10 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
         if args.fp16_opt_level != "O0":
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
-                total_loss += float(scaled_loss)
+                loss = scaled_loss
         else:
             loss.backward()
-            total_loss += float(loss)
+        total_loss += float(loss)
         forward_and_backward_time = time.time()
         logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
 
@@ -417,6 +419,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             visual_output = model.get_visual_output(video, video_mask, shaped=False)
             title_output = model.get_sequence_output(title_ids, title_mask, shaped=False)
             _, visual_output = model.co_attention_model(title_output, visual_output)
+            visual_output = torch.sum(visual_output, dim=1) / visual_output.size(1)
             # co_sequence_output = co_sequence_output[:, 0, :]
             # co_sequence_output = co_sequence_output.view(co_sequence_output.size(0), -1, co_sequence_output.size(-1))
             #
@@ -529,6 +532,9 @@ def main():
     # pretrained = "nghuyong/ernie-1.0"
     logger.info("tokenizer:{}".format(pretrained))
     tokenizer = BertTokenizer.from_pretrained(pretrained)
+    if args.do_train:
+        train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
+        args.train_length = train_length
 
     model = init_model(args, device, n_gpu, args.local_rank)
     ## ####################################
@@ -553,6 +559,8 @@ def main():
                 # paramenters which < freeze_layer_num will be freezed
                 param.requires_grad = False
     '''
+
+
     test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
 
     if args.local_rank == 0:
@@ -562,7 +570,7 @@ def main():
         logger.info("  Num steps = %d", len(test_dataloader))
 
     if args.do_train:
-        train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
+        # train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
         num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
                                         / args.gradient_accumulation_steps) * args.epochs
         # logger.info("train_dataloader len = {}".format(len(train_dataloader)))
