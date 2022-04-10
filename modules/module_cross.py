@@ -18,6 +18,8 @@ from .file_utils import cached_path
 from .until_config import PretrainedConfig
 from .until_module import PreTrainedModel, LayerNorm, ACT2FN
 from collections import OrderedDict
+from modules.module_clip import build_model, CLIP
+
 
 logger = logging.getLogger(__name__)
 
@@ -130,105 +132,60 @@ class Transformer(nn.Module):
         # logger.info("x.shpae:{},attn_mask:{}".format(x.shape, attn_mask.shape))
         return self.resblocks((x, attn_mask))[0]
 
-class CrossEmbeddings(nn.Module):
-    """Construct the embeddings from word, position and token_type embeddings.
-    """
-    def __init__(self, config):
-        super(CrossEmbeddings, self).__init__()
 
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        # logger.info("config.max_position_embeddings:{}".format(config.max_position_embeddings))
-        # logger.info("config.hidden_size:{}".format(config.hidden_size))
-        # self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
-        # self.LayerNorm = LayerNorm(config.hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+class VisualEncoder(nn.Module):
+    def __init__(self, clip, cross_config):
+        super().__init__()
+        self.is_vit = clip.vit
+        self.visual = clip.visual
+        self.temporal_transformer = Transformer(width=cross_config.temporal_hidden_size,
+                                          layers=cross_config.temporal_hidden_layers,
+                                          heads=cross_config.temporal_attention_heads)
+        self.frame_position_embeddings = nn.Embedding(cross_config.max_position_embeddings,
+                                                      cross_config.temporal_hidden_size)
+        # [512, 768]
+        self.temporal_proj = nn.Linear(cross_config.temporal_hidden_size, cross_config.hidden_size)
+        # use clip.transformer to initial temporal_transformer
+        # for param_1, param_2 in zip(self.temporal_transformer.parameters(), clip.transformer.parameters()):
+        #     param_1.data.copy_(param_2.data)  # initialize
 
-    def forward(self, concat_embeddings, concat_type=None):
+    def forward(self, video, video_mask, video_frame):
+        # encode frames
+        bs_pair = video.size(0) // video_frame
+        visual_hidden = self.encode_image(video, video_frame=video_frame)
+        visual_hidden = visual_hidden.view(bs_pair, -1, visual_hidden.size(-1))
+        # get temporal information
+        visual_hidden_original = visual_hidden
+        seq_length = visual_hidden.size(1)
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=visual_hidden.device)
+        position_ids = position_ids.unsqueeze(0).expand(visual_hidden.size(0), -1)
+        frame_position_embeddings = self.frame_position_embeddings(position_ids)
+        visual_hidden = visual_hidden + frame_position_embeddings
 
-        batch_size, seq_length = concat_embeddings.size(0), concat_embeddings.size(1)
-        # if concat_type is None:
-        #     concat_type = torch.zeros(batch_size, concat_type).to(concat_embeddings.device)
+        extended_video_mask = (1.0 - video_mask.unsqueeze(1)) * -1000000.0
+        extended_video_mask = extended_video_mask.expand(-1, video_mask.size(1), -1)
+        visual_hidden = visual_hidden.permute(1, 0, 2)  # NLD -> LND
+        visual_hidden = self.temporal_transformer(visual_hidden, extended_video_mask)
+        visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
+        visual_hidden = visual_hidden + visual_hidden_original
+        # proj hidder: [bs, frames,512] -> [bs, frames,768]
+        visual_hidden = self.temporal_proj(visual_hidden)
+        # [bs, frames,512] -> [bs, 1,768]
+        visual_hidden = torch.mean(visual_hidden, dim=1)
+        return visual_hidden
 
-        position_ids = torch.arange(seq_length, dtype=torch.long, device=concat_embeddings.device)
-        position_ids = position_ids.unsqueeze(0).expand(concat_embeddings.size(0), -1)
-
-        # token_type_embeddings = self.token_type_embeddings(concat_type)
-        # logger.info("position_ids.shape:{}".format(position_ids.shape))
-        position_embeddings = self.position_embeddings(position_ids)
-        # logger.info("concat_embeddings.shape:{}".format(concat_embeddings.shape))
-        # logger.info("position_embeddings.shape:{}".format(position_embeddings.shape))
-        embeddings = concat_embeddings + position_embeddings # + token_type_embeddings
-        # embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
-        return embeddings
-
-class CrossPooler(nn.Module):
-    def __init__(self, config):
-        super(CrossPooler, self).__init__()
-        self.ln_pool = LayerNorm(config.hidden_size)
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = QuickGELU()
-
-    def forward(self, hidden_states, hidden_mask):
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        hidden_states = self.ln_pool(hidden_states)
-        pooled_output = hidden_states[:, 0]
-        pooled_output = self.dense(pooled_output)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
-
-class CrossModel(PreTrainedModel):
-
-    def initialize_parameters(self):
-        proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
-        attn_std = self.transformer.width ** -0.5
-        fc_std = (2 * self.transformer.width) ** -0.5
-        for block in self.transformer.resblocks:
-            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
-            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
-            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
-            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
-
-    def __init__(self, config):
-        super(CrossModel, self).__init__(config)
-
-        self.embeddings = CrossEmbeddings(config)
-
-        transformer_width = config.hidden_size
-        transformer_layers = config.num_hidden_layers
-        transformer_heads = config.num_attention_heads
-        self.transformer = Transformer(width=transformer_width, layers=transformer_layers, heads=transformer_heads,)
-        self.pooler = CrossPooler(config)
-        self.apply(self.init_weights)
-
-    def build_attention_mask(self, attention_mask):
-        # logger.info("attention_mask:{}".format(attention_mask.shape))
-        extended_attention_mask = attention_mask.unsqueeze(1)
-        # logger.info("attention_mask:{}".format(attention_mask.shape))
-        extended_attention_mask = extended_attention_mask.to(dtype=self.dtype)  # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * -1000000.0
-        extended_attention_mask = extended_attention_mask.expand(-1, attention_mask.size(1), -1)
-        return extended_attention_mask
-
-    def forward(self, concat_input, concat_type=None, attention_mask=None, output_all_encoded_layers=True):
-
-        if attention_mask is None:
-            attention_mask = torch.ones(concat_input.size(0), concat_input.size(1))
-            attention_mask = attention_mask.cuda()
-        if concat_type is None:
-            concat_type = torch.zeros_like(attention_mask)
-            concat_type = concat_type.cuda()
-
-        extended_attention_mask = self.build_attention_mask(attention_mask)
-        # logger.info("extended_attention_mask:{}".format(extended_attention_mask.shape))
-
-        embedding_output = self.embeddings(concat_input, concat_type)
-        embedding_output = embedding_output.permute(1, 0, 2)  # NLD -> LND
-        # logger.info("embedding_output:{}".format(embedding_output.shape))
-        embedding_output = self.transformer(embedding_output, extended_attention_mask)
-        embedding_output = embedding_output.permute(1, 0, 2)  # LND -> NLD
-
-        pooled_output = self.pooler(embedding_output, hidden_mask=attention_mask)
-
-        return embedding_output, pooled_output
+    def encode_image(self, image, return_hidden=False, video_frame=-1):
+        if self.is_vit:
+            # logger.info("image.shape:{}".format(image.shape))
+            hidden = self.visual(image, video_frame=video_frame)
+            # logger.info("hidden1.shape:{}".format(hidden.shape))
+            hidden = self.visual.ln_post(hidden) @ self.visual.proj
+            # logger.info("hidden2.shape:{}".format(hidden.shape))
+            x = hidden[:, 0, :]
+            # x = hidden
+        else:
+            hidden = self.visual(image)
+            x = hidden
+        if return_hidden:
+            return x, hidden
+        return x

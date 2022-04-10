@@ -325,7 +325,7 @@ class BertEmbeddings(nn.Module):
 
     def __init__(self, config):
         super(BertEmbeddings, self).__init__()
-        logger.info("BertEmbeddings init")
+        # logger.info("BertEmbeddings init")
         self.task_specific_tokens = config.task_specific_tokens
         self.task_specific_tokens = False
         self.word_embeddings = nn.Embedding(
@@ -379,7 +379,7 @@ class RobertaEmbeddings(BertEmbeddings):
         super(RobertaEmbeddings, self).__init__(config)
         self.padding_idx = 1
 
-        logger.info("RobertaEmbeddings init")
+        # logger.info("RobertaEmbeddings init")
     def forward(self, input_ids, token_type_ids=None, position_ids=None):
         seq_length = input_ids.size(1)
         if position_ids is None:
@@ -529,16 +529,16 @@ class BertLayer(nn.Module):
         self.output = BertOutput(config)
 
     def forward(self, hidden_states, attention_mask):
-        logger.info("BertLayer forward")
-        logger.info("hidden_states.shpae:{}".format(hidden_states.shape))
-        logger.info("attention_mask.shpae:{}".format(attention_mask.shape))
+        # logger.info("BertLayer forward")
+        # logger.info("hidden_states.shpae:{}".format(hidden_states.shape))
+        # logger.info("attention_mask.shpae:{}".format(attention_mask.shape))
         attention_output, attention_probs = self.attention(
             hidden_states, attention_mask
         )
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
-        logger.info("layer_output.shpae:{}".format(layer_output.shape))
-        logger.info("attention_probs:{}".format(attention_probs))
+        # logger.info("layer_output.shpae:{}".format(layer_output.shape))
+        # logger.info("attention_probs:{}".format(attention_probs))
         return layer_output, attention_probs
 
 
@@ -551,6 +551,7 @@ class BertImageSelfAttention(nn.Module):
                 "heads (%d)" % (config.v_hidden_size, config.v_num_attention_heads)
             )
         self.dynamic_attention = config.dynamic_attention
+        # 8
         self.num_attention_heads = config.v_num_attention_heads
         self.attention_head_size = int(
             config.v_hidden_size / config.v_num_attention_heads
@@ -695,20 +696,20 @@ class BertImageLayer(nn.Module):
         self.output = BertImageOutput(config)
 
     def forward(self, hidden_states, attention_mask, txt_embedding, txt_attention_mask):
-        logger.info("BertImageLayer forward")
-        logger.info("hidden_states.shpae:{}".format(hidden_states.shape))
-        logger.info("attention_mask.shpae:{}".format(attention_mask.shape))
-        logger.info("txt_embedding.shpae:{}".format(txt_embedding.shape))
-        logger.info("txt_attention_mask.shpae:{}".format(txt_attention_mask.shape))
+        # logger.info("BertImageLayer forward")
+        # logger.info("hidden_states.shpae:{}".format(hidden_states.shape))
+        # logger.info("attention_mask.shpae:{}".format(attention_mask.shape))
+        # logger.info("txt_embedding.shpae:{}".format(txt_embedding.shape))
+        # logger.info("txt_attention_mask.shpae:{}".format(txt_attention_mask.shape))
         attention_output, attention_probs = self.attention(
             hidden_states, attention_mask, txt_embedding, txt_attention_mask
         )
         intermediate_output = self.intermediate(attention_output)
-        logger.info("intermediate_output.shpae:{}".format(intermediate_output.shape))
+        # logger.info("intermediate_output.shpae:{}".format(intermediate_output.shape))
         layer_output = self.output(intermediate_output, attention_output)
-        logger.info("layer_output.shpae:{}".format(layer_output.shape))
-        logger.info("attention_output.shpae:{}".format(attention_output.shape))
-        logger.info("attention_probs:{}".format(attention_probs))
+        # logger.info("layer_output.shpae:{}".format(layer_output.shape))
+        # logger.info("attention_output.shpae:{}".format(attention_output.shape))
+        # logger.info("attention_probs:{}".format(attention_probs))
         return layer_output, attention_probs
 
 
@@ -726,6 +727,7 @@ class BertBiAttention(nn.Module):
         self.attention_head_size = int(
             config.bi_hidden_size / config.bi_num_attention_heads
         )
+        # 1024 = 8 *
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
         # self.scale = nn.Linear(1, self.num_attention_heads, bias=False)
@@ -935,14 +937,14 @@ class BertConnectionLayer(nn.Module):
 
 
 class co_attention_model(nn.Module):
-    def __init__(self):
+    def __init__(self, cross_config):
         super(co_attention_model, self).__init__()
-        logger.info("co_attention_model init")
+        # logger.info("co_attention_model init")
         co_config_file = "modules/cross-base/bert_base_6layer_6conect.json"
         co_config = BertConfig.from_json_file(co_config_file)
-        self.num_co_attention_layer = 6
+        self.num_co_attention_layer = cross_config.co_attention_layers
         use_pretrain = False
-        logger.info("use_pretrain:{}".format(use_pretrain))
+        # logger.info("use_pretrain:{}".format(use_pretrain))
 
         if use_pretrain:
             model = VILBertForVLTasks.from_pretrained(co_config.from_pretrained, config=co_config)
@@ -962,7 +964,7 @@ class co_attention_model(nn.Module):
 class BertEncoder(nn.Module):
     def __init__(self, config):
         super(BertEncoder, self).__init__()
-        logger.info("BertEncoder init")
+        # logger.info("BertEncoder init")
         # in the bert encoder, we need to extract three things here.
         # text bert layer: BertLayer
         # vision bert layer: BertImageLayer
@@ -1001,7 +1003,7 @@ class BertEncoder(nn.Module):
         output_all_encoded_layers=True,
         output_all_attention_masks=False,
     ):
-        logger.info("BertEncoder forward")
+        # logger.info("BertEncoder forward")
         v_start = 0
         t_start = 0
         count = 0
@@ -1011,19 +1013,19 @@ class BertEncoder(nn.Module):
         all_attention_mask_t = []
         all_attnetion_mask_v = []
         all_attention_mask_c = []
-        logger.info("txt_embedding.size():{}".format(txt_embedding.size()))
-        logger.info("image_embedding.size():{}".format(image_embedding.size()))
+        # logger.info("txt_embedding.size():{}".format(txt_embedding.size()))
+        # logger.info("image_embedding.size():{}".format(image_embedding.size()))
         batch_size, num_words, t_hidden_size = txt_embedding.size()
         _, num_regions, v_hidden_size = image_embedding.size()
 
         use_co_attention_mask = False
-        logger.info("self.fixed_t_layer:{}".format(self.fixed_t_layer))
-        logger.info("self.fixed_v_layer:{}".format(self.fixed_v_layer))
-        logger.info("self.v_biattention_id:{}".format(self.v_biattention_id))
-        logger.info("self.t_biattention_id:{}".format(self.t_biattention_id))
+        # logger.info("self.fixed_t_layer:{}".format(self.fixed_t_layer))
+        # logger.info("self.fixed_v_layer:{}".format(self.fixed_v_layer))
+        # logger.info("self.v_biattention_id:{}".format(self.v_biattention_id))
+        # logger.info("self.t_biattention_id:{}".format(self.t_biattention_id))
         for v_layer_id, t_layer_id in zip(self.v_biattention_id, self.t_biattention_id):
-            logger.info("v_layer_id:{}".format(v_layer_id))
-            logger.info("t_layer_id:{}".format(t_layer_id))
+            # logger.info("v_layer_id:{}".format(v_layer_id))
+            # logger.info("t_layer_id:{}".format(t_layer_id))
             v_end = v_layer_id
             t_end = t_layer_id
 
@@ -1241,7 +1243,7 @@ class BertImgPredictionHeadTransform(nn.Module):
 
 
 class BertLMPredictionHead(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, bert_model_embedding_weights):
         super(BertLMPredictionHead, self).__init__()
         self.transform = BertPredictionHeadTransform(config)
 
@@ -1349,7 +1351,7 @@ class BertPreTrainedModel(PreTrainedModel):
 class BertModel(BertPreTrainedModel):
     def __init__(self, config):
         super(BertModel, self).__init__(config)
-        logger.info("BertModel init")
+        # logger.info("BertModel init")
         # initilize word embedding
         if config.model == "bert":
             self.embeddings = BertEmbeddings(config)
@@ -1474,7 +1476,7 @@ class BertImageEmbeddings(nn.Module):
 
     def __init__(self, config):
         super(BertImageEmbeddings, self).__init__()
-        logger.info("BertImageEmbeddings init")
+        # logger.info("BertImageEmbeddings init")
         self.image_embeddings = nn.Linear(config.v_feature_size, config.v_hidden_size)
         self.image_location_embeddings = nn.Linear(5, config.v_hidden_size)
         self.LayerNorm = BertLayerNorm(config.v_hidden_size, eps=1e-12)
@@ -1663,7 +1665,7 @@ class VILBertForVLTasks(BertPreTrainedModel):
     def __init__(self, config, num_labels=5, dropout_prob=0.1, default_gpu=True):
         super(VILBertForVLTasks, self).__init__(config)
         self.num_labels = num_labels
-        logger.info("VILBertForVLTasks init")
+        # logger.info("VILBertForVLTasks init")
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(dropout_prob)
         self.cls = BertPreTrainingHeads(
@@ -1710,17 +1712,17 @@ class VILBertForVLTasks(BertPreTrainedModel):
         output_all_encoded_layers=False,
         output_all_attention_masks=False,
     ):
-        logger.info("VILBertForVLTasks forward:")
-        logger.info("input_txt.shape:{}".format(input_txt.shape))
-        logger.info("input_imgs.shape:{}".format(input_imgs.shape))
-        logger.info("image_loc.shape:{}".format(image_loc.shape))
-        logger.info("token_type_ids.shape:{},{}".format(token_type_ids.shape,type(token_type_ids[0][0])))
-        logger.info("attention_mask.shape:{}".format(attention_mask.shape))
-        logger.info("image_attention_mask.shape:{}".format(image_attention_mask.shape))
-        logger.info("co_attention_mask.shape:{}".format(co_attention_mask))
-        logger.info("task_ids:{}".format(task_ids))
-        logger.info("output_all_encoded_layers:{}".format(output_all_encoded_layers))
-        logger.info("output_all_attention_masks:{}".format(output_all_attention_masks))
+        # logger.info("VILBertForVLTasks forward:")
+        # logger.info("input_txt.shape:{}".format(input_txt.shape))
+        # logger.info("input_imgs.shape:{}".format(input_imgs.shape))
+        # logger.info("image_loc.shape:{}".format(image_loc.shape))
+        # logger.info("token_type_ids.shape:{},{}".format(token_type_ids.shape,type(token_type_ids[0][0])))
+        # logger.info("attention_mask.shape:{}".format(attention_mask.shape))
+        # logger.info("image_attention_mask.shape:{}".format(image_attention_mask.shape))
+        # logger.info("co_attention_mask.shape:{}".format(co_attention_mask))
+        # logger.info("task_ids:{}".format(task_ids))
+        # logger.info("output_all_encoded_layers:{}".format(output_all_encoded_layers))
+        # logger.info("output_all_attention_masks:{}".format(output_all_attention_masks))
         sequence_output_t, sequence_output_v, pooled_output_t, pooled_output_v, all_attention_mask = self.bert(
             input_txt,
             input_imgs,

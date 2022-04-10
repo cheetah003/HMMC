@@ -5,22 +5,31 @@ from __future__ import print_function
 
 import numpy as np
 import torch
+import logging
+logger = logging.getLogger(__name__)
+
 
 def compute_metrics(x):
+    logger.info("sx:{}".format(np.argmax(x, axis=1)))
     sx = np.sort(-x, axis=1)
     d = np.diag(-x)
     d = d[:, np.newaxis]
+    # logger.info("d:{}".format(d))
     ind = sx - d
+    # logger.info("ind:{}".format(ind))
     ind = np.where(ind == 0)
+    # logger.info("ind1:{}".format(ind))
     ind = ind[1]
     metrics = {}
+    # logger.info("ind2:{}".format(ind))
+    # logger.info("index:{}".format(np.where(ind != 0)))
     metrics['R1'] = float(np.sum(ind == 0)) * 100 / len(ind)
     metrics['R5'] = float(np.sum(ind < 5)) * 100 / len(ind)
     metrics['R10'] = float(np.sum(ind < 10)) * 100 / len(ind)
     metrics['MR'] = np.median(ind) + 1
-    metrics["MedianR"] = metrics['MR']
+    # metrics["MedianR"] = metrics['MR']
     metrics["MeanR"] = np.mean(ind) + 1
-    metrics["cols"] = [int(i) for i in list(ind)]
+    # metrics["cols"] = [int(i) for i in list(ind)]
     return metrics
 
 def print_computed_metrics(metrics):

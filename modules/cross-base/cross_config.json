@@ -1,12 +1,10 @@
 {
-  "attention_probs_dropout_prob": 0.1,
-  "hidden_act": "gelu",
-  "hidden_dropout_prob": 0.1,
+  "max_position_embeddings": 24,
   "hidden_size": 768,
-  "initializer_range": 0.02,
-  "intermediate_size": 2048,
-  "max_position_embeddings": 88,
-  "num_attention_heads": 12,
-  "num_hidden_layers": 6,
-  "vocab_size": 512
+  "temporal_hidden_size": 512,
+  "temporal_attention_heads": 8,
+  "temporal_hidden_layers": 4,
+  "co_attention_layers": 4,
+  "proj_num_layers": 2,
+  "pred_num_layers": 2
 }

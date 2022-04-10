@@ -4,21 +4,19 @@ from __future__ import print_function
 
 import logging
 from abc import ABC
-
-import numpy as np
 import torch
 from torch import nn
+import numpy as np
 import torch.nn.functional as F
 import torch.distributed as dist
 from functools import partial
 from diffdist import functional
-from transformers import BertModel, BertConfig, AutoConfig, AutoModel, BertTokenizer
+from transformers import AutoConfig, AutoModel, BertTokenizer
 
 from modules.until_module import PreTrainedModel, AllGather, CrossEn, Dual_CrossEn
-from modules.module_cross import CrossModel, CrossConfig, Transformer
-from modules.module_vilbert import co_attention_model, BertLMPredictionHead
+from modules.module_cross import Transformer, VisualEncoder, CrossConfig
+from modules.module_vilbert import co_attention_model, BertLMPredictionHead, BertConfig
 from modules.module_clip import CLIP, convert_weights, build_model
-from modules.swin_transformer import SwinTransformer
 
 logger = logging.getLogger(__name__)
 allgather = AllGather.apply
@@ -46,9 +44,6 @@ class CLIP4ClipPreTrainedModel(PreTrainedModel, nn.Module):
     def __init__(self, cross_config, *inputs, **kwargs):
         super(CLIP4ClipPreTrainedModel, self).__init__(cross_config)
         self.cross_config = cross_config
-        self.clip = None
-        self.cross = None
-        self.chinese_bert = None
 
     @classmethod
     def from_pretrained(cls, cross_model_name, state_dict=None, cache_dir=None, type_vocab_size=2, *inputs, **kwargs):
@@ -61,64 +56,14 @@ class CLIP4ClipPreTrainedModel(PreTrainedModel, nn.Module):
             elif task_config.local_rank == -1:
                 task_config.local_rank = 0
 
-        if state_dict is None: state_dict = {}
-        clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/32")
-        # clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/16")
-        # clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-L/14")
-        # clip_state_dict = CLIP.get_config(pretrained_clip_name="RN50")
-        # clip_state_dict = CLIP.get_config(pretrained_clip_name="RN101")
-        # clip_state_dict = CLIP.get_config(pretrained_clip_name="RN50x4")
-        # clip_state_dict = CLIP.get_config(pretrained_clip_name="RN50x16")
-        # clip_state_dict = CLIP.get_config(pretrained_clip_name="RN50x64")
-
-        for key, val in clip_state_dict.items():
-            # logger.info("key:{}".format(key))
-            new_key = "clip." + key
-            new_key_k = "clip_k." + key
-            if new_key not in state_dict:
-                state_dict[new_key] = val.clone()
-                state_dict[new_key_k] = val.clone()
-
         cross_config, _ = CrossConfig.get_config(cross_model_name, cache_dir, type_vocab_size, state_dict=None,
                                                  task_config=task_config)
 
-        model = cls(cross_config, clip_state_dict, *inputs, **kwargs)
+        model = cls(cross_config, *inputs, **kwargs)
 
-        # ===> Initialization trick [HARD CODE]
-        '''
-        if model.sim_header == "seqLSTM" or model.sim_header == "seqTransf":
-            contain_frame_position = False
-            for key in state_dict.keys():
-                if key.find("frame_position_embeddings") > -1:
-                    contain_frame_position = True
-                    break
-            if contain_frame_position is False:
-                for key, val in clip_state_dict.items():
-                    if key == "positional_embedding":
-                        state_dict["frame_position_embeddings.weight"] = val.clone()
-                        continue
-                    if model.sim_header == "seqTransf" and key.find("transformer.resblocks") == 0:
-                        num_layer = int(key.split(".")[2])
-                        # cut from beginning
-                        if num_layer < task_config.cross_num_hidden_layers:
-                            state_dict[key.replace("transformer.", "transformerClip.")] = val.clone()
-                            continue
-         '''
         # <=== End of initialization trick
-
         if state_dict is not None:
             model = cls.init_preweight(model, state_dict, task_config=task_config)
-
-        # for momentum initialize
-        for param_q, param_k in zip(model.clip.parameters(), model.clip_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
-        for param_q, param_k in zip(model.chinese_bert.parameters(), model.chinese_bert_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
-        for param_q, param_k in zip(model.co_attention_model.parameters(), model.co_attention_model_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
 
         return model
 
@@ -142,93 +87,65 @@ def check_attr(target_name, task_config):
 
 
 class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
-    def __init__(self, cross_config, clip_state_dict, task_config):
+    def __init__(self, cross_config, task_config):
         super(BirdPreTrainedModel, self).__init__(cross_config)
         self.task_config = task_config
-        self.ignore_video_index = -1
-
-        assert self.task_config.max_words + self.task_config.max_frames <= cross_config.max_position_embeddings
-
         self.rank = task_config.local_rank
         self.mlm_probability = 0.15
-        self.weight_sum = torch.nn.Parameter(torch.tensor([0.5]), requires_grad=True)
+        self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
         self.contrast_momentum = task_config.contrast_momentum
         self.contrast_temperature = task_config.contrast_temperature
         self.contrast_num_negative = task_config.contrast_num_negative
-        ################## begin of chinese text Encoder
+        ################## chinese text Encoder
         # pretrained = 'voidful/albert_chinese_base'
         pretrained = 'hfl/chinese-roberta-wwm-ext'
         # pretrained = 'hfl/chinese-roberta-wwm-ext-large'
         # pretrained = "nghuyong/ernie-1.0"
         self.tokenizer = BertTokenizer.from_pretrained(pretrained)
-        logger.info("tokenizer:pad:{},cls:{},mask:{}".format(self.tokenizer.pad_token_id,
-                                                             self.tokenizer.cls_token_id, self.tokenizer.mask_token_id))
+        if self.rank == 0:
+            logger.info("tokenizer:pad:{},cls:{},mask:{}".format(self.tokenizer.pad_token_id,
+                                                                 self.tokenizer.cls_token_id,
+                                                                 self.tokenizer.mask_token_id))
         t_config = AutoConfig.from_pretrained(pretrained)
         self.chinese_bert_config = t_config
-        logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
-        self.chinese_bert = AutoModel.from_pretrained(pretrained)
-        self.chinese_bert_k = AutoModel.from_pretrained(pretrained)
-        ################### End of albert text Encoder
-        self.cls = BertLMPredictionHead(t_config)
-        ################## begin of co_attention_model
-        self.co_attention_model = co_attention_model()
-        self.co_attention_model_k = co_attention_model()
-        ################## end of co_attention_model
-        # CLIP Encoders: From OpenAI: CLIP [https://github.com/openai/CLIP] ===>
-        self.clip = build_model(clip_state_dict, local_rank=task_config.local_rank, embed_dim=t_config.hidden_size)
-        self.clip_k = build_model(clip_state_dict, local_rank=task_config.local_rank, embed_dim=t_config.hidden_size)
-        ################## swin transformer
-        '''
-        enc = partial(
-            SwinTransformer,
-            img_size=224,
-            patch_size=4,
-            in_chans=3,
-            embed_dim=96,
-            depths=[2,2,6,2],
-            num_heads=[3,6,12,24],
-            window_size=7,
-            mlp_ratio=4.0,
-            qkv_bias=True,
-            qk_scale=None,
-            drop_rate=0.0,
-            ape=False,
-            patch_norm=True,
-            use_checkpoint=False,
-            norm_befor_mlp="ln",
-        )
-        self.v_encoder = enc(
-            num_classes=0,
-            drop_path_rate=0.2,
-        )
-        '''
-
-        ################## tag model
-        self.tag_model = Transformer(width=t_config.hidden_size,
-                                     layers=self.task_config.tag_num_hidden_layers,
-                                     heads=t_config.hidden_size // 64)
-
+        if self.rank == 0:
+            logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
+        self.text_encoder = AutoModel.from_pretrained(pretrained)
+        self.text_encoder_k = AutoModel.from_pretrained(pretrained)
+        self.t_projector = MLP(num_layers=cross_config.proj_num_layers)
+        self.t_projector_k = MLP(num_layers=cross_config.proj_num_layers)
+        nn.SyncBatchNorm.convert_sync_batchnorm(self.t_projector)
+        nn.SyncBatchNorm.convert_sync_batchnorm(self.t_projector_k)
+        # for MLM
+        self.cls = BertLMPredictionHead(t_config, None)
+        ################## visual_encoder
+        clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/32")
+        clip = build_model(clip_state_dict, local_rank=self.rank)
+        self.visual_encoder = VisualEncoder(clip, cross_config)
+        self.visual_encoder_k = VisualEncoder(clip, cross_config)
+        self.v_projector = MLP(num_layers=cross_config.proj_num_layers)
+        self.v_projector_k = MLP(num_layers=cross_config.proj_num_layers)
+        self.v_predictor = MLP(num_layers=cross_config.pred_num_layers)
+        nn.SyncBatchNorm.convert_sync_batchnorm(self.v_projector)
+        nn.SyncBatchNorm.convert_sync_batchnorm(self.v_projector_k)
+        nn.SyncBatchNorm.convert_sync_batchnorm(self.v_predictor)
+        ################# momemtun mdoel pairs
+        self.model_pairs = [[self.visual_encoder, self.visual_encoder_k],
+                            [self.text_encoder, self.text_encoder_k],
+                            [self.v_projector, self.v_projector_k],
+                            [self.t_projector, self.t_projector_k],
+                            ]
+        self.copy_params()
         ################## create queue
-        self.K = int(self.task_config.train_length * 1. / self.task_config.batch_size) * self.task_config.epochs
-        self.k = int(self.task_config.train_length * 1. / self.task_config.batch_size) * 0
-
-        logger.info("train_len:{},self.K:{},self.k:{}".format(self.task_config.train_length, self.K, self.k))
-        self.register_buffer("queue_video_in", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_tag_in", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_title_in", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_co_video", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_co_tag", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_co_title", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_co_video_title", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_co_query", torch.randn(768, self.contrast_num_negative))
-        self.queue_video_in = F.normalize(self.queue_video_in, dim=0)
-        self.queue_tag_in = F.normalize(self.queue_tag_in, dim=0)
-        self.queue_title_in = F.normalize(self.queue_title_in, dim=0)
-        self.queue_co_video = F.normalize(self.queue_co_video, dim=0)
-        self.queue_co_tag = F.normalize(self.queue_co_tag, dim=0)
-        self.queue_co_title = F.normalize(self.queue_co_title, dim=0)
-        self.queue_co_video_title = F.normalize(self.queue_co_video_title, dim=0)
-        self.queue_co_query = F.normalize(self.queue_co_query, dim=0)
+        self.register_buffer("queue_v1_proj_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_v2_proj_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_title_proj_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_tag_proj_ng", torch.randn(768, self.contrast_num_negative))
+        self.queue_v1_proj_ng = F.normalize(self.queue_v1_proj_ng, dim=0)
+        self.queue_v2_proj_ng = F.normalize(self.queue_v2_proj_ng, dim=0)
+        self.queue_title_proj_ng = F.normalize(self.queue_title_proj_ng, dim=0)
+        self.queue_tag_proj_ng = F.normalize(self.queue_tag_proj_ng, dim=0)
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
@@ -236,7 +153,18 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
 
-        self.apply(self.init_weights)
+        # self.apply(self.init_weights)
+
+    def get_mlm_loss(self, input_ids, input_mask):
+        to_mask_input_ids = input_ids.clone()
+        input_labels = to_mask_input_ids.clone()
+        input_probability_matrix = torch.full(input_labels.shape, self.mlm_probability)
+        masked_input_ids, input_labels = self.mask(to_mask_input_ids, self.tokenizer.vocab_size,
+                                                   input_mask.device, targets=input_labels,
+                                                   probability_matrix=input_probability_matrix)
+        masked_input_output = self.get_sequence_output(masked_input_ids, input_mask, return_hidden=True)
+        mlm_input_loss = self.calculate_mlm_loss(masked_input_output, input_labels)
+        return mlm_input_loss
 
     def calculate_mlm_loss(self, sequence_output_mlm, labels):
         mlm_scores = self.cls(sequence_output_mlm)
@@ -272,18 +200,14 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         else:
             return input_ids
 
-    def get_sequence_output(self, input_ids, attention_mask, return_hidden=False, shaped=False, is_momentum=False):
-        if shaped is False:
-            input_ids = input_ids.view(-1, input_ids.shape[-1])
-            attention_mask = attention_mask.view(-1, attention_mask.shape[-1])
-
+    def get_sequence_output(self, input_ids, attention_mask, return_hidden=False, is_momentum=False):
         bs_pair = input_ids.size(0)
         # logger.info("albert encoder")
         # logger.info("input_ids.shape:{}".format(input_ids.shape))
         if is_momentum:
-            sequence_hidden = self.chinese_bert_k(input_ids, attention_mask=attention_mask)
+            sequence_hidden = self.text_encoder_k(input_ids, attention_mask=attention_mask)
         else:
-            sequence_hidden = self.chinese_bert(input_ids, attention_mask=attention_mask)
+            sequence_hidden = self.text_encoder(input_ids, attention_mask=attention_mask)
         # logger.info("before sequence_hidden.shape:{}".format(sequence_hidden.shape))
         if return_hidden:
             sequence_hidden = sequence_hidden[0]
@@ -291,178 +215,94 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             sequence_hidden = sequence_hidden[1]
 
         sequence_hidden = sequence_hidden.view(bs_pair, -1, sequence_hidden.size(-1))
+        sequence_hidden = sequence_hidden.squeeze()
         # logger.info("after sequence_hidden1.shape:{}".format(sequence_hidden.shape))
         return sequence_hidden
-
-    def get_visual_output(self, video, video_mask, shaped=False, video_frame=-1, is_momentum=False):
-        if shaped is False:
-            video = torch.as_tensor(video).float()
-            video_mask = video_mask.view(-1, video_mask.shape[-1])
-            b, pair, bs, ts, channel, h, w = video.shape
-            video = video.view(b * pair * bs * ts, channel, h, w)
-            video_frame = bs * ts
-        bs_pair = video.size(0) // video_frame
-        # logger.info("video.shape:{}".format(video.shape))
-        if is_momentum:
-            visual_hidden = self.clip_k.encode_image(video, video_frame=video_frame)
-        else:
-            visual_hidden = self.clip.encode_image(video, video_frame=video_frame)
-        # visual_hidden = self.v_encoder(video)
-        # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
-        visual_hidden = visual_hidden.view(bs_pair, -1, visual_hidden.size(-1))
-        # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
-        return visual_hidden
-
-    def get_tag_output(self, visual_output, video_mask, shaped=False):
-        if shaped is False:
-            video_mask = video_mask.view(-1, video_mask.shape[-1])
-        extended_video_mask = (1.0 - video_mask.unsqueeze(1)) * -1000000.0
-        extended_video_mask = extended_video_mask.expand(-1, video_mask.size(1), -1)
-        visual_output_temp = visual_output.permute(1, 0, 2)
-        video_tag_output = self.tag_model(visual_output_temp, extended_video_mask)
-        video_tag_output = video_tag_output.permute(1, 0, 2)
-        # video_tag_output = torch.sum(video_tag_output, dim=1) / video_tag_output.size(1)
-
-        return video_tag_output
-
-    def mean_pooling_for_similarity_sequence(self, sequence_output, attention_mask):
-        attention_mask_un = attention_mask.to(dtype=torch.float).unsqueeze(-1)
-        attention_mask_un[:, 0, :] = 0.
-        sequence_output = sequence_output * attention_mask_un
-        text_out = torch.sum(sequence_output, dim=1) / torch.sum(attention_mask_un, dim=1, dtype=torch.float)
-        return text_out
-
-    def mean_pooling_for_similarity_visual(self, visual_output):
-        video_out = torch.sum(visual_output, dim=1) / visual_output.size(1)
-        return video_out
-
-    def mean_pooling_for_similarity(self, sequence_output, visual_output, attention_mask, video_mask, ):
-        text_out = self.mean_pooling_for_similarity_sequence(sequence_output, attention_mask)
-        video_out = self.mean_pooling_for_similarity_visual(visual_output, video_mask)
-
-        return text_out, video_out
-
-    def loose_similarity_for_text(self, query_text, input_text):
-        query_text = query_text.contiguous()
-        input_text = input_text.contiguous()
-
-        if self.training:
-            input_text = allgather(input_text, self.task_config)
-            query_text = allgather(query_text, self.task_config)
-            torch.distributed.barrier()
-
-        input_text = input_text.squeeze(1)
-        input_text = input_text / input_text.norm(dim=-1, keepdim=True)
-
-        query_text = query_text.squeeze(1)
-        query_text = query_text / query_text.norm(dim=-1, keepdim=True)
-
-        logit_scale = self.clip.logit_scale.exp()
-        # if self.rank == 0:
-        #     logger.info("logit_scale_text:{}".format(logit_scale))
-        retrieve_logits = logit_scale * torch.matmul(query_text, input_text.t())
-        # logger.info("retrieve_logits.shape:{}".format(retrieve_logits.shape))
-        return retrieve_logits
 
     def loose_similarity(self, sequence_output, visual_output):
         sequence_output, visual_output = sequence_output.contiguous(), visual_output.contiguous()
 
-        if self.training:
-            visual_output = allgather(visual_output, self.task_config)
-            sequence_output = allgather(sequence_output, self.task_config)
-            torch.distributed.barrier()
-
-        visual_output = visual_output.squeeze(1)
+        visual_output = visual_output.squeeze()
         visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
-        # visual_output = self.mean_pooling_for_similarity_visual(visual_output)
-        # visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
 
-        sequence_output = sequence_output.squeeze(1)
+        sequence_output = sequence_output.squeeze()
         sequence_output = sequence_output / sequence_output.norm(dim=-1, keepdim=True)
-        # logger.info("allgather sequence_output.shape:{}".format(sequence_output.shape))
-        # logger.info("allgather visual_output.shape:{}".format(visual_output.shape))
-        # sequence_output, visual_output = self.co_attention_model(sequence_output, visual_output)
 
-        logit_scale = self.clip.logit_scale.exp()
+        logit_scale = self.logit_scale.exp()
+        logit_scale.data = torch.clamp(logit_scale.data, max=100)
         # if self.rank == 0:
-        #     logger.info("logit_scale:{}".format(logit_scale))
+        #     logger.info("logit_scale:{},dtype:{}".format(logit_scale, logit_scale.dtype))
+        #     logger.info("sequence_output.shape:{}".format(sequence_output.shape))
+        #     logger.info("visual_output.shape:{}".format(visual_output.shape))
         retrieve_logits = logit_scale * torch.matmul(sequence_output, visual_output.t())
-        # logger.info("retrieve_logits.shape:{}".format(retrieve_logits.shape))
-        return retrieve_logits
-
-    def get_similarity_logits(self, sequence_output, visual_output):
-        retrieve_logits = self.loose_similarity(sequence_output, visual_output)
         return retrieve_logits
 
     @torch.no_grad()
-    def _momentum_update_key_encoder(self):
-        """
-        Momentum update of the key encoder
-        """
-        _contrast_momentum = 1. - (1. - self.contrast_momentum) * (np.cos(np.pi * self.k / self.K) + 1) / 2.
-        self.k = self.k + 1
-
-        for param_q, param_k in zip(self.clip.parameters(), self.clip_k.parameters()):
-            param_k.data = param_k.data * _contrast_momentum + param_q.data * (1. - _contrast_momentum)
-
-        for param_q, param_k in zip(self.chinese_bert.parameters(), self.chinese_bert_k.parameters()):
-            param_k.data = param_k.data * _contrast_momentum + param_q.data * (1. - _contrast_momentum)
-
-        for param_q, param_k in zip(self.co_attention_model.parameters(), self.co_attention_model_k.parameters()):
-            param_k.data = param_k.data * _contrast_momentum + param_q.data * (1. - _contrast_momentum)
+    def copy_params(self):
+        for model_pair in self.model_pairs:
+            for param, param_k in zip(model_pair[0].parameters(), model_pair[1].parameters()):
+                param_k.data.copy_(param.data)  # initialize
+                param_k.requires_grad = False  # not update by gradient
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self, video_in_k=None, tag_in_k=None, title_in_k=None, co_video_output_k=None,
-                             co_tag_output_k=None, co_title_output_k=None, co_video_title_output_k=None,
-                             co_query_output_k=None):
-        batch_size = self.task_config.batch_size
+    def _momentum_update(self):
+        for model_pair in self.model_pairs:
+            for param, param_k in zip(model_pair[0].parameters(), model_pair[1].parameters()):
+                param_k.data = param_k.data * self.contrast_momentum + param.data * (1. - self.contrast_momentum)
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, v1_proj_k, v2_proj_k, tag_proj_k, title_proj_k):
+
+        # gather keys before updating queue
+        v1_proj_k = dist_collect(v1_proj_k).squeeze()
+        v1_proj_k = F.normalize(v1_proj_k, dim=1)
+        v2_proj_k = dist_collect(v2_proj_k).squeeze()
+        v2_proj_k = F.normalize(v2_proj_k, dim=1)
+        tag_proj_k = dist_collect(tag_proj_k).squeeze()
+        tag_proj_k = F.normalize(tag_proj_k, dim=1)
+        title_proj_k = dist_collect(title_proj_k).squeeze()
+        title_proj_k = F.normalize(title_proj_k, dim=1)
+
+        batch_size = v1_proj_k.size(0)
         ptr = int(self.queue_ptr)
-        assert self.contrast_num_negative % batch_size == 0  # for simplicity
+        if self.rank == 0:
+            logger.info(
+                "begin>>>>: ptr:{},batch_size:{},queue_size:{}".format(ptr, batch_size, self.contrast_num_negative))
+            logger.info("v1_proj_k.shape:{},tag_proj_k.shape:{}".format(v1_proj_k.shape, tag_proj_k.shape))
 
-        if video_in_k is not None:
-            # gather keys before updating queue
-            video_in_k = dist_collect(video_in_k).squeeze(1)
-            # replace the keys at ptr (dequeue and enqueue)
-            self.queue_video_in[:, ptr:ptr + batch_size] = video_in_k.T
-        if tag_in_k is not None:
-            tag_in_k = dist_collect(tag_in_k).squeeze(1)
-            self.queue_tag_in[:, ptr:ptr + batch_size] = tag_in_k.T
-        if title_in_k is not None:
-            title_in_k = dist_collect(title_in_k).squeeze(1)
-            self.queue_title_in[:, ptr:ptr + batch_size] = title_in_k.T
-        if co_video_output_k is not None:
-            co_video_output_k = dist_collect(co_video_output_k).squeeze(1)
-            self.queue_co_video[:, ptr:ptr + batch_size] = co_video_output_k.T
-        if co_tag_output_k is not None:
-            co_tag_output_k = dist_collect(co_tag_output_k).squeeze(1)
-            self.queue_co_tag[:, ptr:ptr + batch_size] = co_tag_output_k.T
-        if co_title_output_k is not None:
-            co_title_output_k = dist_collect(co_title_output_k).squeeze(1)
-            self.queue_co_title[:, ptr:ptr + batch_size] = co_title_output_k.T
-        if co_video_title_output_k is not None:
-            co_video_title_output_k = dist_collect(co_video_title_output_k).squeeze(1)
-            self.queue_co_video_title[:, ptr:ptr + batch_size] = co_video_title_output_k.T
-        if co_query_output_k is not None:
-            co_query_output_k = dist_collect(co_query_output_k).squeeze(1)
-            self.queue_co_query[:, ptr:ptr + batch_size] = co_query_output_k.T
+        # replace the keys at ptr (dequeue and enqueue)
+        self.queue_v1_proj_ng[:, ptr:ptr + batch_size] = v1_proj_k.T
+        self.queue_v2_proj_ng[:, ptr:ptr + batch_size] = v2_proj_k.T
+        self.queue_tag_proj_ng[:, ptr:ptr + batch_size] = tag_proj_k.T
+        self.queue_title_proj_ng[:, ptr:ptr + batch_size] = title_proj_k.T
 
-        ptr = (ptr + batch_size) % self.contrast_num_negative  # move pointer
+        # move pointer
+        ptr = (ptr + batch_size) % self.contrast_num_negative
+        if self.rank == 0:
+            logger.info("end>>>>: ptr:{}".format(ptr))
         self.queue_ptr[0] = ptr
 
     def contrastive_loss(self, q, k, queue):
 
-        q = q.squeeze(1)
-        k = k.squeeze(1)
+        q = q.squeeze()
+        q = F.normalize(q, dim=1)
+        k = k.squeeze()
+        k = F.normalize(k, dim=1)
+
+        bs = q.size(0)
         # logger.info("q.dtype:{},k.dtype:{}".format(q.dtype, k.dtype))
         # positive logits: Nx1
+        # >>>>>>got error in apex:amp level=01!!!!!!!!!
         # l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
         l_pos = torch.matmul(q, k.T)
+        l_pos = torch.diag(l_pos).reshape([bs, -1])
         # negative logits: NxK
         # l_neg = torch.einsum('nc,ck->nk', [q, queue.clone().detach()])
         l_neg = torch.matmul(q, queue.clone().detach())
         # logits: Nx(1+K)
         logits = torch.cat([l_pos, l_neg], dim=1)
-
+        # if self.rank == 0:
+        #     logger.info("logits.shape:{}".format(logits.shape))
         # apply temperature
         logits /= self.contrast_temperature
 
@@ -471,241 +311,262 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
         return F.cross_entropy(logits, labels)
 
-    def forward(self, video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask):
-
-        tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
+    def forward(self, video_data1, video_data2, video_mask, tag_ids, tag_mask, title_ids, title_mask, global_step):
         video_mask = video_mask.view(-1, video_mask.shape[-1])
+        tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
         tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
         title_ids = title_ids.view(-1, title_ids.shape[-1])
         title_mask = title_mask.view(-1, title_mask.shape[-1])
-        # T x 3 x H x W
-        video = torch.as_tensor(video_data)
-        b, pair, bs, ts, channel, h, w = video.shape
-        video = video.view(b * pair * bs * ts, channel, h, w)
-        video_frame = bs * ts
+        # bs x frames x 3 x H x W
+        video1 = torch.as_tensor(video_data1)
+        video2 = torch.as_tensor(video_data2)
 
-        # logger.info("input_ids.shape:{}".format(input_ids.shape))
-        logger.info("video.shape:{}".format(video.shape))
-        # logger.info("sequence_output.shape:{}".format(sequence_output.shape))
-        # logger.info("visual_output.shape:{}".format(visual_output.shape))
-        # logger.info("masked_title.shape:{}".format(masked_title.shape))
-        if self.training:
-            loss = 0.
-            if self.task_config.stage == "stage1":
-                video_in = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame)
-                video_in_mpool = torch.sum(video_in, dim=1) / video_in.size(1)
-                tag_in = self.get_sequence_output(tag_ids, tag_mask, shaped=True)
-                title_in = self.get_sequence_output(title_ids, title_mask, shaped=True)
-                if self.rank == 0:
-                    logger.info("video_in.shape:{}".format(video_in.shape))
-                    logger.info("title_in.shape:{}".format(title_in.shape))
-                _, co_video_output = self.co_attention_model(video_in, video_in)
-                co_video_output = torch.sum(co_video_output, dim=1) / video_in.size(1)
-                co_tag_output, _ = self.co_attention_model(tag_in, tag_in)
-                co_title_output, _ = self.co_attention_model(title_in, title_in)
-                _, co_video_title_output = self.co_attention_model(title_in, video_in)
-                co_video_title_output = torch.sum(co_video_title_output, dim=1) / video_in.size(1)
-                # compute key features
-                with torch.no_grad():  # no gradient to keys
-                    self._momentum_update_key_encoder()  # update the key encoder
-                    video_in_k = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame,
-                                                        is_momentum=True)
-                    video_in_mpool_k = torch.sum(video_in_k, dim=1) / video_in_k.size(1)
-                    tag_in_k = self.get_sequence_output(tag_ids, tag_mask, shaped=True, is_momentum=True)
-                    title_in_k = self.get_sequence_output(title_ids, title_mask, shaped=True, is_momentum=True)
-                    _, co_video_output_k = self.co_attention_model_k(video_in_k, video_in_k)
-                    co_video_output_k = torch.sum(co_video_output_k, dim=1) / co_video_output_k.size(1)
-                    co_tag_output_k, _ = self.co_attention_model_k(tag_in_k, tag_in_k)
-                    co_title_output_k, _ = self.co_attention_model_k(title_in_k, title_in_k)
-                    _, co_video_title_output_k = self.co_attention_model_k(title_in_k, video_in_k)
-                    co_video_title_output_k = torch.sum(co_video_title_output_k, dim=1) / co_video_title_output_k.size(1)
+        if self.rank == 0:
+            logger.info("video1.shape:{},video_mask1.shape:{}".format(video1.shape, video_mask.shape))
 
-                # compute contrastive loss
-                # video_in - tag_in
-                logger.info("video_in_mpool.dtype:{},tag_in_k.dtype:{},tag_in.dtype:{}".format(video_in_mpool.dtype,
-                                                                                        tag_in_k.dtype, tag_in.dtype))
-                video_tag_in_loss = self.contrastive_loss(video_in_mpool, tag_in_k, self.queue_tag_in) \
-                                    + self.contrastive_loss(tag_in, video_in_mpool_k, self.queue_video_in)
-                loss += video_tag_in_loss
-                # video_in - title_in
-                video_title_in_loss = self.contrastive_loss(video_in_mpool, title_in_k, self.queue_title_in) \
-                                      + self.contrastive_loss(title_in, video_in_mpool_k, self.queue_video_in)
-                loss += video_title_in_loss
-                # video - tag
-                video_tag_loss = self.contrastive_loss(co_video_output, co_tag_output_k, self.queue_co_tag) \
-                                 + self.contrastive_loss(co_tag_output, co_video_output_k, self.queue_co_video)
-                loss += video_tag_loss
-                # video - title
-                video_title_loss = self.contrastive_loss(co_video_output, co_title_output_k, self.queue_co_title) \
-                                   + self.contrastive_loss(co_title_output, co_video_output_k, self.queue_co_video)
-                loss += video_title_loss
-                # (video + title) - tag
-                video_title_tag_loss = self.contrastive_loss(co_video_title_output, co_tag_output_k, self.queue_co_tag) \
-                                       + self.contrastive_loss(co_tag_output, co_video_title_output_k,
-                                                               self.queue_co_video_title)
-                loss += video_title_tag_loss
+        bs, video_frame, channel, h, w = video1.shape
+        video1 = video1.view(bs * video_frame, channel, h, w)
+        video2 = video2.view(bs * video_frame, channel, h, w)
 
-                self._dequeue_and_enqueue(video_in_mpool_k, tag_in_k, title_in_k, co_video_output_k, co_tag_output_k,
-                                          co_title_output_k, co_video_title_output_k)
-
-                # for MLM
-                to_mask_tag_ids = tag_ids.clone()
-                tag_labels = to_mask_tag_ids.clone()
-                to_mask_title_ids = title_ids.clone()
-                title_labels = to_mask_title_ids.clone()
-
-                tag_probability_matrix = torch.full(tag_labels.shape, self.mlm_probability)
-                masked_tag_ids, tag_label = self.mask(to_mask_tag_ids, self.tokenizer.vocab_size,
-                                                      video.device, targets=tag_labels,
-                                                      probability_matrix=tag_probability_matrix)
-                title_probability_matrix = torch.full(title_labels.shape, self.mlm_probability)
-                masked_title_ids, title_label = self.mask(to_mask_title_ids, self.tokenizer.vocab_size,
-                                                          video.device, targets=title_labels,
-                                                          probability_matrix=title_probability_matrix)
-
-                masked_tag_output = self.get_sequence_output(masked_tag_ids, tag_mask, return_hidden=True, shaped=True)
-                masked_title_output = self.get_sequence_output(masked_title_ids, title_mask, return_hidden=True,
-                                                               shaped=True)
-
-                co_masked_tag_output, _ = self.co_attention_model(masked_tag_output, video_in)
-                co_masked_title_output, _ = self.co_attention_model(masked_title_output, video_in)
-
-                mlm_tag_loss = self.calculate_mlm_loss(masked_tag_output, tag_labels)
-                loss += mlm_tag_loss
-                mlm_co_tag_loss = self.calculate_mlm_loss(co_masked_tag_output, tag_labels)
-                loss += mlm_co_tag_loss
-                mlm_title_loss = self.calculate_mlm_loss(masked_title_output, title_labels)
-                loss += mlm_title_loss
-                mlm_co_title_loss = self.calculate_mlm_loss(co_masked_title_output, title_labels)
-                loss += mlm_co_title_loss
-                logger.info("mlm_tag_loss:{},mlm_co_tag_loss:{}".format(mlm_tag_loss, mlm_co_tag_loss))
-                logger.info("mlm_title_loss:{}, mlm_co_title_loss:{}".format(mlm_title_loss, mlm_co_title_loss))
-                return loss
-            elif self.task_config.stage == "stage2":
-                # add MMM and VTM
-                video_output = self.get_visual_output(video, video_mask, shaped=True, video_frame=video_frame)
-                tag_label_output = self.get_sequence_output(tag_ids, tag_mask, shaped=True)
-                title_output = self.get_sequence_output(title_ids, title_mask, shaped=True)
-                co_title_output, _ = self.co_attention_model(title_output, title_output)
-                video_tag_output = self.get_tag_output(video_output, video_mask)
-                _, co_video_tag_output = self.co_attention_model(video_tag_output, video_output)
-
-                logger.info("video_output.shape:{}".format(video_output.shape))
-                logger.info("video_mask.shape:{}".format(video_mask.shape))
-                # video_tag - tag_label loss
-                tag_label_output = tag_label_output.squeeze()
-                # (batch, frames, hidden)
-                video_tag_output = torch.sum(video_tag_output, dim=1) / video_tag_output.size(1)
-                # (batch, hidden)
-                logger.info("video_tag_output.shape:{}".format(video_tag_output.shape))
-                # (batch, hidden)
-                logger.info("tag_label_output.shape:{}".format(tag_label_output.shape))
-                tag_loss = (tag_label_output - video_tag_output) ** 2
-                tag_loss = tag_loss.mean(dim=-1)
-                # logger.info("tag_loss.shape:{}".format(tag_loss.shape))
-                tag_loss = tag_loss.sum()
-                logger.info("tag_loss.sum:{}".format(tag_loss))
-                loss += tag_loss
-                # (video, video_tag) - title loss
-                co_video_tag_output = torch.sum(co_video_tag_output, dim=1) / co_video_tag_output.size(1)
-                sim_matrix = self.get_similarity_logits(co_title_output, co_video_tag_output)
-                sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-                loss += sim_loss
-                logger.info("sim_loss:{}".format(sim_loss))
-
-                return loss
-        else:
-            return None
-
-class BirdModel(BirdPreTrainedModel):
-    def forward(self, query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-                pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank):
-        query_ids = query_ids.view(-1, query_ids.shape[-1])
-
-        query_mask = query_mask.view(-1, query_mask.shape[-1])
-        pos_title_ids = pos_title_ids.view(-1, pos_title_ids.shape[-1])
-        pos_title_mask = pos_title_mask.view(-1, pos_title_mask.shape[-1])
-        hard_title_ids = hard_title_ids.view(-1, hard_title_ids.shape[-1])
-        hard_title_mask = hard_title_mask.view(-1, hard_title_mask.shape[-1])
-        pos_video_mask = pos_video_mask.view(-1, pos_video_mask.shape[-1])
-        hard_video_mask = hard_video_mask.view(-1, hard_video_mask.shape[-1])
-
-        # T x 3 x H x W
-        pos_video = torch.as_tensor(pos_video_data)
-        hard_video = torch.as_tensor(hard_video_data)
-        b, pair, bs, ts, channel, h, w = pos_video.shape
-        pos_video = pos_video.view(b * pair * bs * ts, channel, h, w)
-        hard_video = hard_video.view(b * pair * bs * ts, channel, h, w)
-        video_frame = bs * ts
         if self.training:
             loss = 0.0
-            query_output = self.get_sequence_output(query_ids, query_mask, shaped=True)
-            co_query_output, _ = self.co_attention_model(query_output, query_output)
-            pos_visual_output = self.get_visual_output(pos_video, pos_video_mask, shaped=True, video_frame=video_frame)
-            hard_visual_output = self.get_visual_output(hard_video, hard_video_mask, shaped=True,
-                                                        video_frame=video_frame)
-            pos_title_output = self.get_sequence_output(pos_title_ids, pos_title_mask, shaped=True)
-            hard_title_output = self.get_sequence_output(hard_title_ids, hard_title_mask, shaped=True)
-            # _, pooled_output = self.get_cross_output(video_fea=visual_output, text_fea=title_output)
-            if self.task_config.use_tag:
-                pos_tag_output = self.get_tag_output(pos_visual_output, pos_video_mask, shaped=True)
-                pos_tag_output = torch.sum(pos_tag_output, dim=1, keepdim=True) / pos_tag_output.size(1)
-                hard_tag_output = self.get_tag_output(hard_visual_output, hard_video_mask, shaped=True)
-                hard_tag_output = torch.sum(hard_tag_output, dim=1, keepdim=True) / hard_tag_output.size(1)
-                pos_title_output = torch.cat([pos_title_output, pos_tag_output], dim=1)
-                hard_title_output = torch.cat([hard_title_output, hard_tag_output], dim=1)
+            v1_fea = self.visual_encoder(video1, video_mask, video_frame)
+            v2_fea = self.visual_encoder(video2, video_mask, video_frame)
+            tag_fea = self.get_sequence_output(tag_ids, tag_mask)
+            title_fea = self.get_sequence_output(title_ids, title_mask)
+
+            #for video self supervised learning
+            # [bs,hidden_size]
+            v1_proj = self.v_projector(v1_fea)
+            v1_pred = self.v_predictor(v1_proj)
+            # [bs,hidden_size]
+            v2_proj = self.v_projector(v2_fea)
+            v2_pred = self.v_predictor(v2_proj)
+            # [bs,hidden_size]
+            tag_proj = self.t_projector(tag_fea)
+            title_proj = self.t_projector(title_fea)
+
             # if self.rank == 0:
-                # logger.info("pos_title_output.shape:{}".format(pos_title_output.shape))
-                # logger.info("pos_visual_output.shape:{}".format(pos_visual_output.shape))
-            _, pos_co_video_title_output = self.co_attention_model(pos_title_output, pos_visual_output)
-            pos_co_video_title_output = torch.sum(pos_co_video_title_output, dim=1) / pos_co_video_title_output.size(1)
-            _, hard_co_visual_output = self.co_attention_model(hard_title_output, hard_visual_output)
-            hard_co_visual_output = torch.sum(hard_co_visual_output, dim=1) / hard_co_visual_output.size(1)
-
+            #     logger.info("video1_fea.shape:{}".format(v1_fea.shape))
+            #     logger.info("v1_proj.shape:{}".format(v1_proj.shape))
+            #     logger.info("v1_pred.shape:{}".format(v1_pred.shape))
+            #     logger.info("title_fea.shape:{}".format(title_fea.shape))
+            # compute key features
             with torch.no_grad():  # no gradient to keys
-                self._momentum_update_key_encoder()  # update the key encoder
-                query_in_k = self.get_sequence_output(query_ids, query_mask, shaped=True, is_momentum=True)
-                co_query_output_k, _ = self.co_attention_model_k(query_in_k, query_in_k)
-                pos_video_in_k = self.get_visual_output(pos_video, pos_video_mask, shaped=True, video_frame=video_frame,
-                                                    is_momentum=True)
-                pos_title_in_k = self.get_sequence_output(pos_title_ids, pos_title_mask, shaped=True, is_momentum=True)
-                _, pos_co_video_title_output_k = self.co_attention_model_k(pos_title_in_k, pos_video_in_k)
-                pos_co_video_title_output_k = torch.sum(pos_co_video_title_output_k, dim=1) / pos_co_video_title_output_k.size(1)
+                self._momentum_update()  # update the key encoder
+                tag_fea_k = self.get_sequence_output(tag_ids, tag_mask, is_momentum=True)
+                tag_proj_k = self.t_projector_k(tag_fea_k)
+                title_fea_k = self.get_sequence_output(title_ids, title_mask, is_momentum=True)
+                title_proj_k = self.t_projector_k(title_fea_k)
+                #
+                v1_fea_k = self.visual_encoder_k(video1, video_mask, video_frame)
+                v2_fea_k = self.visual_encoder_k(video2, video_mask, video_frame)
+                v1_proj_k = self.v_projector_k(v1_fea_k)
+                v2_proj_k = self.v_projector_k(v2_fea_k)
 
-            # (video + title) - tag # random negtive loss
-            video_title_tag_loss = self.contrastive_loss(pos_co_video_title_output, co_query_output_k, self.queue_co_query) \
-                                   + self.contrastive_loss(co_query_output, pos_co_video_title_output_k,
-                                                           self.queue_co_video_title)
-            loss += video_title_tag_loss
-
-            self._dequeue_and_enqueue(co_query_output_k=co_query_output_k, co_video_title_output_k=pos_co_video_title_output_k)
-            # hard negtive loss
-            sim_matrix = self.get_similarity_logits(query_output, pos_co_video_title_output)
-            # logger.info("sim_matrix:{}".format(sim_matrix))
-            single_positive_scores = torch.diagonal(sim_matrix, 0)
-            sim_matrix_hard = self.get_similarity_logits(query_output, hard_co_visual_output)
-            # logger.info("sim_matrix_hard:{}".format(sim_matrix_hard))
-            single_hard_scores = torch.diagonal(sim_matrix_hard, 0)
-            hard_sim_matrix = torch.cat([single_positive_scores.unsqueeze(1),
-                                         single_hard_scores.unsqueeze(1)], dim=1)
-            # logger.info("hard_sim_matrix:{}".format(hard_sim_matrix))
-            hard_lsm = F.log_softmax(hard_sim_matrix, dim=1)
-
-            # logger.info("hard_lsm:{}".format(hard_lsm))
-            hard_loss = -1.0 * hard_lsm[:, 0]
-            # logger.info("hard_loss:{}".format(hard_loss))
-            if self.task_config.use_rank:
-                hard_rank = dist_collect(hard_rank)
-                # logger.info("rank:{}".format(hard_rank))
-                hard_rank = hard_rank / self.task_config.max_rank
-                hard_loss = hard_loss * hard_rank
-            # logger.info("hard_loss:{}".format(hard_loss))
-            hard_loss = hard_loss.mean()
+            # compute loss
             if self.rank == 0:
-                logger.info("hard_loss_mean:{}".format(hard_loss))
-                logger.info("video_title_tag_loss:{}".format(video_title_tag_loss))
-            loss += hard_loss
-            # logger.info("hard_sim_matrix:{}".format(hard_sim_matrix))
+                logger.info("dtype: v1_fea:{},tag_fea:{},title_fea:{}".format(v1_fea.dtype,tag_fea.dtype,title_fea.dtype))
+
+            # in batch loss
+            # all_v1_proj = dist_collect(v1_proj)
+            # all_v2_proj = dist_collect(v2_proj)
+            # all_tag_proj = dist_collect(tag_proj)
+            # all_title_proj = dist_collect(title_proj)
+            #
+            # sim_matrix = self.loose_similarity(all_v1_proj, all_tag_proj)
+            # v1_tag_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            #
+            # sim_matrix = self.loose_similarity(all_v1_proj, all_title_proj)
+            # v1_title_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            #
+            # sim_matrix = self.loose_similarity(all_v2_proj, all_tag_proj)
+            # v2_tag_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            #
+            # sim_matrix = self.loose_similarity(all_v2_proj, all_title_proj)
+            # v2_title_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            #
+            # inbatch_loss = (v1_tag_loss + v1_title_loss + v2_tag_loss + v2_title_loss) / 4
+
+            # video queue loss
+            v_queue_loss = self.contrastive_loss(v1_pred, v2_proj_k, self.queue_v2_proj_ng) \
+                                + self.contrastive_loss(v2_pred, v1_proj_k, self.queue_v1_proj_ng)
+
+            # cross modality queue loss
+            v1_tag_queue_loss = self.contrastive_loss(v1_proj, tag_proj_k, self.queue_tag_proj_ng) \
+                           + self.contrastive_loss(tag_proj, v1_proj_k, self.queue_v1_proj_ng)
+            v1_title_queue_loss = self.contrastive_loss(v1_proj, title_proj_k, self.queue_title_proj_ng) \
+                                + self.contrastive_loss(title_proj, v1_proj_k, self.queue_v1_proj_ng)
+            v2_tag_queue_loss = self.contrastive_loss(v2_proj, tag_proj_k, self.queue_tag_proj_ng) \
+                                + self.contrastive_loss(tag_proj, v2_proj_k, self.queue_v2_proj_ng)
+            v2_title_queue_loss = self.contrastive_loss(v2_proj, title_proj_k, self.queue_title_proj_ng) \
+                                  + self.contrastive_loss(title_proj, v2_proj_k, self.queue_v2_proj_ng)
+            cross_queue_loss = (v1_tag_queue_loss + v1_title_queue_loss + v2_tag_queue_loss + v2_title_queue_loss) / 4
+
+            # dequeue_and_enqueue
+            self._dequeue_and_enqueue(v1_proj_k, v2_proj_k, tag_proj_k, title_proj_k)
+
+            # for MLM loss
+            mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
+            mlm_title_loss = self.get_mlm_loss(title_ids, title_mask)
+            mlm_loss = mlm_tag_loss + mlm_title_loss
+
+            # total loss
+            # loss += inbatch_loss + v_queue_loss + cross_queue_loss + mlm_loss
+            loss += v_queue_loss + cross_queue_loss + mlm_loss
+            if self.rank == 0:
+                logger.info("v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}".format(
+                                            v_queue_loss, cross_queue_loss, mlm_loss))
+                logger.info("loss:{}".format(loss))
+                if self.task_config.logdir:
+                    loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss),
+                                 "cross_queue_loss": float(cross_queue_loss), "mlm_loss": float(mlm_loss)}
+                    self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
             return loss
         else:
             return None
+
+
+class BirdModel(BirdPreTrainedModel):
+    def __init__(self, cross_config, task_config):
+        super(BirdPreTrainedModel, self).__init__(cross_config)
+        self.task_config = task_config
+        self.rank = task_config.local_rank
+        self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
+        ################## chinese text Encoder
+        # pretrained = 'voidful/albert_chinese_base'
+        pretrained = 'hfl/chinese-roberta-wwm-ext'
+        # pretrained = 'hfl/chinese-roberta-wwm-ext-large'
+        # pretrained = "nghuyong/ernie-1.0"
+        t_config = AutoConfig.from_pretrained(pretrained)
+        if self.rank == 0:
+            logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
+        self.text_encoder = AutoModel.from_pretrained(pretrained)
+        ################## visual_encoder
+        clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/32")
+        clip = build_model(clip_state_dict, local_rank=self.rank)
+        # logger.info("clip.logit_scale:{}".format(clip.logit_scale.exp()))
+        self.visual_encoder = VisualEncoder(clip, cross_config)
+        ################## loss function
+        self.loss_fct = CrossEn()
+        self.loss_fct_dual = Dual_CrossEn()
+
+    def forward(self, query_ids, query_mask, video_data, video_mask, idx, global_step):
+        query_ids = query_ids.view(-1, query_ids.shape[-1])
+        query_mask = query_mask.view(-1, query_mask.shape[-1])
+        video_mask = video_mask.view(-1, video_mask.shape[-1])
+        # T x 3 x H x W
+        video = torch.as_tensor(video_data)
+        bs, video_frame, channel, h, w = video.shape
+        video = video.view(bs * video_frame, channel, h, w)
+        if self.training:
+            loss = 0.0
+            query_output = self.get_sequence_output(query_ids, query_mask)
+            visual_output = self.visual_encoder(video, video_mask, video_frame)
+            if self.rank == 0:
+                logger.info("video.shape:[{},{},{},{},{}]".format(bs, video_frame, channel, h, w))
+                logger.info("query_output.shape:{},dtype:{}".format(query_output.shape, query_output.dtype))
+                logger.info("visual_output.shape:{},dtype:{}".format(visual_output.shape, visual_output.dtype))
+
+            visual_output = dist_collect(visual_output).squeeze(1)
+            query_output = dist_collect(query_output).squeeze(1)
+
+            # in batch loss
+            sim_matrix = self.loose_similarity(query_output, visual_output)
+            sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            loss += sim_loss
+            if self.rank == 0:
+                logger.info("sim_loss:{},type:{},sim_matrix.shape:{}".format(sim_loss, sim_loss.dtype, sim_matrix.shape))
+
+                if self.task_config.logdir:
+                    self.task_config.writer.add_scalar('loss', float(loss), global_step=global_step)
+            return loss
+        else:
+            return None
+
+
+class BirdModel_VT(BirdPreTrainedModel):
+    def __init__(self, cross_config, task_config):
+        super(BirdPreTrainedModel, self).__init__(cross_config)
+        self.task_config = task_config
+        self.rank = task_config.local_rank
+        self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
+        ################## chinese text Encoder
+        # pretrained = 'voidful/albert_chinese_base'
+        pretrained = 'hfl/chinese-roberta-wwm-ext'
+        # pretrained = 'hfl/chinese-roberta-wwm-ext-large'
+        # pretrained = "nghuyong/ernie-1.0"
+        t_config = AutoConfig.from_pretrained(pretrained)
+        if self.rank == 0:
+            logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
+        self.text_encoder = AutoModel.from_pretrained(pretrained)
+        ################## visual_encoder
+        clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/32")
+        clip = build_model(clip_state_dict, local_rank=self.rank)
+        self.visual_encoder = VisualEncoder(clip, cross_config)
+
+        ################## loss function
+        self.loss_fct = CrossEn()
+        self.loss_fct_dual = Dual_CrossEn()
+
+    def forward(self, query_ids, query_mask, video_data, video_mask, title_ids, title_mask, idx, global_step):
+        query_ids = query_ids.view(-1, query_ids.shape[-1])
+        query_mask = query_mask.view(-1, query_mask.shape[-1])
+        title_ids = title_ids.view(-1, title_ids.shape[-1])
+        title_mask = title_mask.view(-1, title_mask.shape[-1])
+        video_mask = video_mask.view(-1, video_mask.shape[-1])
+        # T x 3 x H x W
+        video = torch.as_tensor(video_data)
+        bs, video_frame, channel, h, w = video.shape
+        video = video.view(bs * video_frame, channel, h, w)
+        if self.training:
+            loss = 0.0
+            query_output = self.get_sequence_output(query_ids, query_mask)
+            title_output = self.get_sequence_output(title_ids, title_mask)
+            visual_output = self.visual_encoder(video, video_mask, video_frame)
+
+            visual_output = dist_collect(visual_output).squeeze(1)
+            query_output = dist_collect(query_output).squeeze(1)
+            title_output = dist_collect(title_output).squeeze(1)
+            # in batch loss
+            sim_matrix = self.loose_similarity(query_output, visual_output)
+            sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            loss += sim_loss
+
+            sim_matrix_title = self.loose_similarity(query_output, title_output)
+            sim_loss_title = self.loss_fct(sim_matrix_title) + self.loss_fct(sim_matrix_title.T)
+            loss += sim_loss_title
+
+            if self.rank == 0:
+                logger.info("sim_loss:{},sim_loss_title:{}".format(sim_loss, sim_loss_title))
+                if self.task_config.logdir:
+                    loss_item = {"loss": float(loss), "sim_loss": float(sim_loss), "sim_loss_title": float(sim_loss_title)}
+                    # self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
+                    self.task_config.writer.add_scalar('loss', float(loss), global_step=global_step)
+            return loss
+        else:
+            return None
+
+
+class MLP(nn.Module):
+    def __init__(self, in_dim=768, inner_dim=4096, out_dim=768, num_layers=2):
+        super(MLP, self).__init__()
+
+        # hidden layers
+        linear_hidden = [nn.Identity()]
+        for i in range(num_layers - 1):
+            linear_hidden.append(nn.Linear(in_dim if i == 0 else inner_dim, inner_dim))
+            linear_hidden.append(nn.BatchNorm1d(inner_dim))
+            linear_hidden.append(nn.ReLU(inplace=True))
+        self.linear_hidden = nn.Sequential(*linear_hidden)
+
+        self.linear_out = nn.Linear(in_dim if num_layers == 1 else inner_dim,
+                                    out_dim) if num_layers >= 1 else nn.Identity()
+
+    def forward(self, x):
+        x = self.linear_hidden(x)
+        x = self.linear_out(x)
+
+        return x

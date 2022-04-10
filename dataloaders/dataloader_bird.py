@@ -13,13 +13,30 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import BertTokenizer
 from dataloaders.randaugment import RandomAugment
 from PIL import Image
+from PIL import ImageFilter
 import cv2
 import logging
 
 logger = logging.getLogger(__name__)
 
 #global, number of frames in lmdb per video
-g_lmdb_frames = 24
+g_lmdb_frames = 48
+max_dynamic_pretrain_frames = 12
+max_dynamic_train_frames = 16
+max_dynamic_val_frames = 16
+
+
+class GaussianBlur(object):
+    """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
+
+    def __init__(self, sigma=[.1, 2.]):
+        self.sigma = sigma
+
+    def __call__(self, x):
+        sigma = random.uniform(self.sigma[0], self.sigma[1])
+        x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return x
+
 
 def read_json(path):
     with open(path, 'r', encoding='utf8') as f:
@@ -36,10 +53,27 @@ def read_json_line(path):
             data.append(item)
     return data
 
+
+def get_flat_query_list(query_list):
+    flat_query_list = list()
+    for itm in query_list:
+        query = itm['query']
+        poslist = itm['videolist']
+        for positem in poslist:
+            item = dict()
+            item["query"] = query
+            item["docid"] = positem["docid"]
+            item["title"] = positem["title"]
+            item["duration"] = positem["duration"]
+            flat_query_list.append(item)
+
+    return flat_query_list
+
+
 """load: video title tag asr"""
 class dataload_bird_pretrain(VisionDataset):
-    def __init__(self, root: str, jsonpath_asr:str, maxTxns: int = 1, tokenizer=None,stage=None,
-                 resolution=224, max_words=32, max_frames=24, transform: Optional[Callable] = None,
+    def __init__(self, root: str, videoinfo_path:str, maxTxns: int = 1, tokenizer=None,
+                 resolution=224, max_words=32, max_frames=12, transform: Optional[Callable] = None,
                  is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
         super().__init__(root, transform=transform)
         self._maxTxns = maxTxns
@@ -49,9 +83,8 @@ class dataload_bird_pretrain(VisionDataset):
         self.resolution = resolution
         self.max_words = max_words
         self.max_frames = max_frames
-        self.stage = stage
         if tokenizer is None:
-            self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext-large')
+            self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext')
         else:
             self.tokenizer = tokenizer
         # print("self.tokenizer:{}.".format(self.tokenizer.vocab))
@@ -60,19 +93,19 @@ class dataload_bird_pretrain(VisionDataset):
         # with open(os.path.join(root, "metadata.json"), "r") as fp:
         #     metadata = json.load(fp)
         # self._length = metadata["length"]
-        datadict = read_json(jsonpath_asr)
-        self.datalist = list(datadict.values())
+        self.datalist = read_json_line(videoinfo_path)
+        # self.datalist = self.datalist[:256]
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
         self.transform = transforms.Compose([
-            transforms.RandomResizedCrop(self.resolution, scale=(0.2, 1.0),
-                                         interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomResizedCrop(224, scale=(0.2, 1.)),  # 0.08-1
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
             transforms.RandomHorizontalFlip(),
-            RandomAugment(2,7,isPIL=True,augs=['Identity','AutoContrast','Equalize','Brightness','Sharpness',
-                                              'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate']),
             transforms.ToTensor(),
-            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
     def __enter__(self):
         return self
@@ -113,10 +146,18 @@ class dataload_bird_pretrain(VisionDataset):
 
         return pairs_text, pairs_mask, pairs_segment
 
-    def _get_video(self, video_key=None):
+    def _get_video(self, video_key, max_frames):
         video_list = list()
         global g_lmdb_frames
-        for i in range(g_lmdb_frames):
+        # global writer
+        # random sample start ##################################################
+        video_index = np.arange(0, g_lmdb_frames)
+        sample_slice = random.sample(list(video_index), max_frames * 2)
+        sample_slice1 = sorted(sample_slice[0:max_frames])
+        sample_slice2 = sorted(sample_slice[max_frames:2 * max_frames])
+        sample_slice = sample_slice1 + sample_slice2
+        # random sample end ##################################################
+        for step, i in enumerate(sample_slice):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
             video = self._txn.get(video_key_new)
@@ -125,29 +166,28 @@ class dataload_bird_pretrain(VisionDataset):
             frame_data = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
             # print("frame_data.shape:{}".format(frame_data.shape))
             frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+            # print("[{}]frame_rgb.shape:{}".format(step, frame_rgb.shape))
             frame_img = Image.fromarray(frame_rgb).convert("RGB")
+            # print("frame_img.shape:{}".format(np.array(frame_img).shape))
+            # writer.add_image('original_img', frame_rgb, global_step=step, dataformats='HWC')
             frame_data = self.transform(frame_img)
+            # print("[{}]frame_data.shape:{}".format(step, frame_data.shape))
             video_list.append(frame_data)
         video_data = np.stack(video_list)
+        print("video data.shape:{}".format(video_data.shape))
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([-1, g_lmdb_frames, 1, 3, self.resolution, self.resolution])
-        #random sample start ##################################################
-        assert g_lmdb_frames % self.max_frames == 0
-        video_index = np.arange(0, g_lmdb_frames)
-        # print("video_index:{}".format(video_index))
-        slice = list()
-        k = g_lmdb_frames // self.max_frames
-        for i in np.arange(self.max_frames):
-            index = random.choice(video_index[k * i:k * (i + 1)])
-            slice.append(index)
-        # print("slice:{}".format(slice))
-        video_data = video_data[:, slice, :, :, :, :]
-        # print("video_data2.shpae:{}".format(video_data.shape))
-        #random sample end ##################################################
-        # print("video:{},shape:{},type:{},dtype:{}".format(sys.getsizeof(video_data), video_data.shape, type(video_data),
-        #                                                   video_data.dtype))
-        return video_data
+        video_data = video_data.reshape([2*max_frames, 3, self.resolution, self.resolution])
+        video_data1 = video_data[:max_frames, :, :, :]
+        video_data2 = video_data[max_frames:2*max_frames, :, :, :]
+        if self.max_frames == -1:
+            # dynamic frame needs pad
+            if max_frames < max_dynamic_pretrain_frames:
+                pad = np.zeros([max_dynamic_pretrain_frames - max_frames, 3, self.resolution, self.resolution])
+                video_data1 = np.concatenate((video_data1, pad), axis=0)
+                video_data2 = np.concatenate((video_data2, pad), axis=0)
+
+        return video_data1, video_data2
 
     def __getitem__(self, index: int):
         """
@@ -160,20 +200,24 @@ class dataload_bird_pretrain(VisionDataset):
         if self._env is None:
             self._initEnv()
         item = self.datalist[index]
+        if self.max_frames == -1:
+            # dynamic frame
+            max_frames = min(max(item["duration"] // 4, 2), max_dynamic_pretrain_frames)
+            video_mask = np.concatenate((np.ones(max_frames, dtype=int),
+                                         np.zeros(max_dynamic_pretrain_frames - max_frames, dtype=int)))
+        else:
+            max_frames = self.max_frames
+            video_mask = np.ones(max_frames, dtype=int)
         video_key = "Video" + item['docid']
-        video_data = self._get_video(video_key)
-        video_mask = np.ones(self.max_frames, dtype=np.long)
-        ########### not used ocr ###############
-        # title_ids = masked_title = masked_title_label = masked_ocr = masked_ocr_label = ocr_ids
-        ######################################
-        # query_text = item['query']
+        video_data1, video_data2 = self._get_video(video_key, max_frames)
+
         tag_text = item['tag']
         title_text = item['title']
         # print("title[{}]:{}".format(index,title_text))
         # print("video[{}]:{}".format(index, item['video_id']))
-        tag_ids, tag_mask, tag_segment = self._get_text(tag_text)
+        tag_ids, tag_mask, _ = self._get_text(tag_text)
         title_ids, title_mask, _ = self._get_text(title_text)
-        return video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask
+        return video_data1, video_data2, video_mask, tag_ids, tag_mask, title_ids, title_mask
 
     def __len__(self) -> int:
         return self._length
@@ -181,9 +225,8 @@ class dataload_bird_pretrain(VisionDataset):
 
 class dataload_bird_train(VisionDataset):
     def __init__(self, root: str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_words=32, max_frames=24, transform: Optional[Callable] = None,
-                 is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
-        super().__init__(root, transform=transform)
+                 resolution=224, max_words=32, max_frames=24, task="retrieval_VT") -> None:
+        super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
@@ -191,31 +234,28 @@ class dataload_bird_train(VisionDataset):
         self.resolution = resolution
         self.max_words = max_words
         self.max_frames = max_frames
+        self.task = task
         if tokenizer is None:
             self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext-large')
         else:
             self.tokenizer = tokenizer
-        # print("self.tokenizer:{}.".format(self.tokenizer.vocab))
-        # Length is needed for DistributedSampler, but we can't use env to get it, env can't pickle.
-        # So we decide to read from metadata placed in the same folder --- see src/misc/datasetCreate.py
-        # with open(os.path.join(root, "metadata.json"), "r") as fp:
-        #     metadata = json.load(fp)
-        # self._length = metadata["length"]
-        # self.datadict = read_json(jsonpath_asr)
-        self.datalist = read_json_line(jsonpath_query)
 
+        querylist = read_json_line(jsonpath_query)
+        self.datalist = get_flat_query_list(querylist)
+        # self.datalist = self.datalist[:2048]
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
         self.transform = transforms.Compose([
-            transforms.RandomResizedCrop(self.resolution, scale=(0.5, 1.0),
-                                         interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomResizedCrop(224, scale=(0.5, 1.)),  # 0.08-1
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
             transforms.RandomHorizontalFlip(),
-            RandomAugment(2,7,isPIL=True,augs=['Identity','AutoContrast','Equalize','Brightness','Sharpness',
-                                              'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate']),
             transforms.ToTensor(),
-            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
+
     def __enter__(self):
         return self
 
@@ -255,10 +295,25 @@ class dataload_bird_train(VisionDataset):
 
         return pairs_text, pairs_mask, pairs_segment
 
-    def _get_video(self, video_key=None):
+    def _get_video(self, video_key, max_frames):
         video_list = list()
         global g_lmdb_frames
-        for i in range(g_lmdb_frames):
+        # global writer
+        # random sample start ##################################################
+        # assert g_lmdb_frames % self.max_frames == 0
+        # video_index = np.arange(0, g_lmdb_frames)
+        # # print("video_index:{}".format(video_index))
+        # sample_slice = list()
+        # k = g_lmdb_frames // self.max_frames
+        # for i in np.arange(self.max_frames):
+        #     index = random.choice(video_index[k * i:k * (i + 1)])
+        #     sample_slice.append(index)
+        # sample
+        video_index = np.arange(0, g_lmdb_frames)
+        sample_slice = random.sample(list(video_index), max_frames)
+        sample_slice = sorted(sample_slice)
+        # random sample end ##################################################
+        for step, i in enumerate(sample_slice):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
             video = self._txn.get(video_key_new)
@@ -267,37 +322,24 @@ class dataload_bird_train(VisionDataset):
             frame_data = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
             # print("frame_data.shape:{}".format(frame_data.shape))
             frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+            # print("[{}]frame_rgb.shape:{}".format(step, frame_rgb.shape))
             frame_img = Image.fromarray(frame_rgb).convert("RGB")
+            # print("frame_img.shape:{}".format(np.array(frame_img).shape))
+            # writer.add_image('original_img', frame_rgb, global_step=step, dataformats='HWC')
             frame_data = self.transform(frame_img)
+            # print("[{}]frame_data.shape:{}".format(step, frame_data.shape))
             video_list.append(frame_data)
         video_data = np.stack(video_list)
         video_data = video_data.copy()
-        # video_data = video_data.astype('float32')
-        video_data = video_data.reshape([-1, g_lmdb_frames, 1, 3, self.resolution, self.resolution])
-        #random sample start ##################################################
-        assert g_lmdb_frames % self.max_frames == 0
-        video_index = np.arange(0, g_lmdb_frames)
-        # print("video_index:{}".format(video_index))
-        slice = list()
-        k = g_lmdb_frames // self.max_frames
-        for i in np.arange(self.max_frames):
-            index = random.choice(video_index[k * i:k * (i + 1)])
-            slice.append(index)
-        # print("slice:{}".format(slice))
-        video_data = video_data[:, slice, :, :, :, :]
-        # print("video_data2.shpae:{}".format(video_data.shape))
-        #random sample end ##################################################
-        # print("video:{},shape:{},type:{},dtype:{}".format(sys.getsizeof(video_data), video_data.shape, type(video_data),
-        #                                                   video_data.dtype))
-        return video_data
+        # video_data = video_data.astype('float64')
+        video_data = video_data.reshape([max_frames, 3, self.resolution, self.resolution])
+        if self.max_frames == -1:
+            # dynamic frame needs pad
+            if max_frames < max_dynamic_train_frames:
+                pad = np.zeros([max_dynamic_train_frames - max_frames, 3, self.resolution, self.resolution])
+                video_data = np.concatenate((video_data, pad), axis=0)
 
-    def _get_pos_hardneg_pair(self, item=None):
-        query = item['query']
-        poslist = item['video_id']
-        hardneglist = item['hardneg_video_id']
-        pos_item = random.choice(poslist)
-        hardneg_item = random.choice(hardneglist)
-        return query, pos_item, hardneg_item
+        return video_data
 
     def __getitem__(self, index: int):
         """
@@ -310,23 +352,26 @@ class dataload_bird_train(VisionDataset):
         if self._env is None:
             self._initEnv()
         item = self.datalist[index]
-        query, pos_item, hard_item = self._get_pos_hardneg_pair(item)
-        pos_videoid = "Video" + pos_item['docid']
-        hard_videoid = "Video" + hard_item['docid']
-        pos_video_data = self._get_video(pos_videoid)
-        hard_video_data = self._get_video(hard_videoid)
-        pos_title = pos_item['title']
-        hard_title = hard_item['title']
-        hard_rank = int(hard_item["rank"])
-        # logger.info("[{}]hard_rank:{}".format(index, hard_rank))
-        # print("video[{}]:{}".format(index, item['video_id']))
+        if self.max_frames == -1:
+            # dynamic frame
+            max_frames = min(max(item["duration"] // 2, 3), max_dynamic_train_frames)
+            video_mask = np.concatenate((np.ones(max_frames, dtype=int), np.zeros(max_dynamic_train_frames - max_frames,
+                                                                                  dtype=int)))
+        else:
+            max_frames = self.max_frames
+            video_mask = np.ones(max_frames, dtype=int)
+        # query, pos_item = self._get_pos_pair(item)
+        query = item['query']
+        videoid = "Video" + item['docid']
+        video_data = self._get_video(videoid, max_frames)
         query_ids, query_mask, _ = self._get_text(query)
-        pos_title_ids, pos_title_mask, _ = self._get_text(pos_title)
-        hard_title_ids, hard_title_mask, _ = self._get_text(hard_title)
-        pos_video_mask = np.ones(self.max_frames, dtype=np.long)
-        hard_video_mask = np.ones(self.max_frames, dtype=np.long)
-        return query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank
+
+        if self.task == "retrieval_VT":
+            title = item['title']
+            title_ids, title_mask, _ = self._get_text(title)
+            return query_ids, query_mask, video_data, video_mask, title_ids, title_mask, index
+        else:
+            return query_ids, query_mask, video_data, video_mask, index
 
     def __len__(self) -> int:
         return self._length
@@ -334,9 +379,8 @@ class dataload_bird_train(VisionDataset):
 
 class dataload_bird_val(VisionDataset):
     def __init__(self, root: str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_words=32, max_frames=24, transform: Optional[Callable] = None,
-                 is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
-        super().__init__(root, transform=transform)
+                 resolution=224, max_words=32, max_frames=24, task="retrieval_VT") -> None:
+        super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
@@ -344,18 +388,14 @@ class dataload_bird_val(VisionDataset):
         self.resolution = resolution
         self.max_words = max_words
         self.max_frames = max_frames
+        self.task = task
         if tokenizer is None:
             self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext-large')
         else:
             self.tokenizer = tokenizer
-        # print("self.tokenizer:{}.".format(self.tokenizer.vocab))
-        # Length is needed for DistributedSampler, but we can't use env to get it, env can't pickle.
-        # So we decide to read from metadata placed in the same folder --- see src/misc/datasetCreate.py
-        # with open(os.path.join(root, "metadata.json"), "r") as fp:
-        #     metadata = json.load(fp)
-        # self._length = metadata["length"]
-        # self.datadict = read_json(jsonpath_asr)
+
         self.datalist = read_json_line(jsonpath_query)
+        # self.datalist = self.datalist[:256]
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
@@ -381,7 +421,7 @@ class dataload_bird_val(VisionDataset):
 
     def _get_pos_pair(self, item=None):
         query = item['query']
-        poslist = item['video_id']
+        poslist = item['videolist']
         pos_item = poslist[0]
         return query, pos_item
 
@@ -410,10 +450,15 @@ class dataload_bird_val(VisionDataset):
 
         return pairs_text, pairs_mask, pairs_segment
 
-    def _get_video(self, video_key=None):
+    def _get_video(self, video_key, max_frames):
         video_list = list()
         global g_lmdb_frames
-        for i in range(g_lmdb_frames):
+        #uniform sample start ##################################################
+        # assert g_lmdb_frames % self.max_frames == 0
+        # video_index = np.arange(0, g_lmdb_frames, g_lmdb_frames // self.max_frames)
+        video_index = np.linspace(0, g_lmdb_frames, max_frames, endpoint=False, dtype=int)
+        #uniform sample end ##################################################
+        for i in video_index:
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
             video = self._txn.get(video_key_new)
@@ -427,16 +472,13 @@ class dataload_bird_val(VisionDataset):
             video_list.append(frame_data)
         video_data = np.stack(video_list)
         video_data = video_data.copy()
-        # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([-1, g_lmdb_frames, 1, 3, self.resolution, self.resolution])
-        #uniform sample start ##################################################
-        assert g_lmdb_frames % self.max_frames == 0
-        video_index = np.arange(0, g_lmdb_frames, g_lmdb_frames//self.max_frames)
-        video_data = video_data[:, video_index, :, :, :, :]
-        # print("video_data2.shpae:{}".format(video_data.shape))
-        #uniform sample end ##################################################
-        # print("video:{},shape:{},type:{},dtype:{}".format(sys.getsizeof(video_data), video_data.shape, type(video_data),
-        #                                                   video_data.dtype))
+        video_data = video_data.reshape([max_frames, 3, self.resolution, self.resolution])
+        if self.max_frames == -1:
+            # dynamic frame needs pad
+            if max_frames < max_dynamic_val_frames:
+                pad = np.zeros([max_dynamic_val_frames - max_frames, 3, self.resolution, self.resolution])
+                video_data = np.concatenate((video_data, pad), axis=0)
+
         return video_data
 
     def __getitem__(self, index: int):
@@ -451,33 +493,27 @@ class dataload_bird_val(VisionDataset):
             self._initEnv()
         item = self.datalist[index]
         query, pos_item = self._get_pos_pair(item)
-        pos_videoid = "Video" + pos_item["docid"]
-        pos_video_data = self._get_video(pos_videoid)
-        pos_title = pos_item['title']
-        # print("title[{}]:{}".format(index,title_text))
+        videoid = "Video" + pos_item["docid"]
+        if self.max_frames == -1:
+            # dynamic frame
+            max_frames = min(max(item["duration"] // 2, 3), max_dynamic_val_frames)
+            video_mask = np.concatenate((np.ones(max_frames, dtype=int), np.zeros(max_dynamic_val_frames - max_frames,
+                                                                                  dtype=int)))
+        else:
+            max_frames = self.max_frames
+            video_mask = np.ones(max_frames, dtype=int)
+        video_data = self._get_video(videoid, max_frames)
+        # query = "关于 " + query + " 的视频"
+        # print("[{}]query:{},title:{},video:{}".format(index, query, pos_title, videoid))
         # print("video[{}]:{}".format(index, item['video_id']))
         query_ids, query_mask, _ = self._get_text(query)
-        pos_title_ids, pos_title_mask, _ = self._get_text(pos_title)
-        pos_video_mask = np.ones(self.max_frames, dtype=np.long)
-        return query_ids, query_mask, pos_video_data, pos_video_mask, pos_title_ids, pos_title_mask
+
+        if self.task == "retrieval_VT":
+            title = pos_item['title']
+            title_ids, title_mask, _ = self._get_text(title)
+            return query_ids, query_mask, video_data, video_mask, title_ids, title_mask
+        else:
+            return query_ids, query_mask, video_data, video_mask
 
     def __len__(self) -> int:
         return self._length
-
-
-# if __name__ == "__main__":
-#     testdataset = BasicLMDB(root='database')
-#     dataloader = DataLoader(
-#         testdataset,
-#         batch_size=1,
-#         num_workers=0,
-#         shuffle=False,
-#         drop_last=False,
-#     )
-#     for bid, batch in enumerate(dataloader):
-#         pairs_text, pairs_mask, pairs_segment, video_data, video_mask = batch
-#         print("bid:{},video.shape:{},pairs_text:{}".format(bid, video_data.shape, pairs_text))
-#         print("pairs_mask.shape:{},pairs_mask:{}".format(pairs_mask.shape,pairs_mask))
-#         print("pairs_segment.shape:{},pairs_segment:{}".format(pairs_segment.shape, pairs_segment))
-#         print("video_mask.shape:{},video_mask:{}".format(video_mask.shape, video_mask))
-        # print("bid:{},caption:{}".format(bid, caption))

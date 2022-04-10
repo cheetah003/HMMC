@@ -4,21 +4,21 @@ from __future__ import unicode_literals
 from __future__ import print_function
 import os
 
-# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
 import torch
 from torch.utils.data import (SequentialSampler)
 import numpy as np
 import random
 from thop import profile
 
-
 from metrics import compute_metrics, tensor_text_to_video_metrics, tensor_video_to_text_sim
 import time
 import argparse
 from sklearn import preprocessing
 from transformers import BertTokenizer, AutoTokenizer, AutoModel
+from tensorboardX import SummaryWriter
 from modules.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
-from modules.modeling import BirdModel, BirdPreTrainedModel
+from modules.modeling import BirdModel_VT, BirdPreTrainedModel, BirdModel
 from modules.optimization import BertAdam
 from modules.until_module import get_dual_matrix
 from torch.utils.data import DataLoader
@@ -28,6 +28,7 @@ from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_tr
 from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader
 from dataloaders.dataloader_msvd_retrieval import MSVD_DataLoader
 from dataloaders.dataloader_lsmdc_retrieval import LSMDC_DataLoader
+
 try:
     # noinspection PyUnresolvedReferences
     from apex import amp
@@ -45,7 +46,10 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--do_params", action='store_true', help="text the params of the model.")
-
+    parser.add_argument('--task', type=str, default="retrieval_VT", choices=["retrieval_VT", "retrieval"],
+                        help="choose downstream task.")
+    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt"],
+                        help="choose dataset.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
     parser.add_argument('--chinese_lr', type=float, default=0.00001, help='chinese learning rate')
@@ -54,24 +58,15 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--batch_size_val', type=int, default=3500, help='batch size eval')
     parser.add_argument('--lr_decay', type=float, default=0.9, help='Learning rate exp epoch decay')
     parser.add_argument('--n_display', type=int, default=100, help='Information display frequence')
-    parser.add_argument('--video_dim', type=int, default=1024, help='video feature dimension')
     parser.add_argument('--seed', type=int, default=42, help='random seed')
-    parser.add_argument('--max_words', type=int, default=20, help='')
-    parser.add_argument('--max_frames', type=int, default=100, help='')
-    parser.add_argument('--feature_framerate', type=int, default=1, help='')
-    parser.add_argument('--margin', type=float, default=0.1, help='margin for loss')
-    parser.add_argument('--hard_negative_rate', type=float, default=0.5, help='rate of intra negative sample')
-    parser.add_argument('--negative_weighting', type=int, default=1, help='Weight the loss for intra negative')
-    parser.add_argument('--n_pair', type=int, default=1, help='Num of pair to output from data loader')
-    parser.add_argument('--contrast_num_negative', type=int, default=4096, help='Num of negative sample in queue')
-    parser.add_argument('--contrast_momentum', type=float, default=0.99, help='momentum')
-    parser.add_argument('--contrast_temperature', type=float, default=10, help='temperature')
+    parser.add_argument('--max_words', type=int, default=32, help='')
+    parser.add_argument('--max_frames', type=int, default=12, help='')
 
+    parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--cross_model", default="cross-base", type=str, required=False, help="Cross module")
     parser.add_argument("--init_model", default=None, type=str, required=False, help="Initial model.")
-    parser.add_argument("--do_lower_case", action='store_true', help="Set this flag if you are using an uncased model.")
     parser.add_argument("--warmup_proportion", default=0.1, type=float,
                         help="Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10%% of training.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
@@ -81,56 +76,23 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--cache_dir", default="", type=str,
                         help="Where do you want to store the pre-trained models downloaded from s3")
 
-    parser.add_argument('--fp16', action='store_true',
-                        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
     parser.add_argument('--fp16_opt_level', type=str, default='O1',
                         help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
                              "See details at https://nvidia.github.io/apex/amp.html")
-
-    parser.add_argument("--task_type", default="retrieval", type=str, help="Point the task `retrieval` to finetune.")
-    parser.add_argument("--datatype", default="msrvtt", type=str, help="Point the dataset to finetune.")
 
     parser.add_argument("--world_size", default=0, type=int, help="distribted training")
     parser.add_argument("--local_rank", default=0, type=int, help="distribted training")
     parser.add_argument("--rank", default=0, type=int, help="distribted training")
     parser.add_argument('--coef_lr', type=float, default=1., help='coefficient for bert branch.')
-    parser.add_argument('--use_mil', action='store_true', help="Whether use MIL as Miech et. al. (2020).")
-    parser.add_argument('--sampled_use_mil', action='store_true', help="Whether MIL, has a high priority than use_mil.")
 
-    parser.add_argument('--text_num_hidden_layers', type=int, default=12, help="Layer NO. of text.")
-    parser.add_argument('--visual_num_hidden_layers', type=int, default=12, help="Layer NO. of visual.")
-    parser.add_argument('--cross_num_hidden_layers', type=int, default=6, help="Layer NO. of cross.")
-    parser.add_argument('--tag_num_hidden_layers', type=int, default=6, help="Layer NO. of tag model.")
-
-    parser.add_argument('--train_frame_order', type=int, default=0, choices=[0, 1, 2],
-                        help="Frame order, 0: ordinary order; 1: reverse order; 2: random order.")
-    parser.add_argument('--eval_frame_order', type=int, default=0, choices=[0, 1, 2],
-                        help="Frame order, 0: ordinary order; 1: reverse order; 2: random order.")
-
-    parser.add_argument('--loose_type', action='store_true', help="Default using tight type for retrieval.")
-    
-    parser.add_argument('--freeze_layer_num', type=int, default=0, help="Layer NO. of CLIP need to freeze.")
-    parser.add_argument('--slice_framepos', type=int, default=0, choices=[0, 1, 2],
-                        help="0: cut from head frames; 1: cut from tail frames; 2: extract frames uniformly.")
-    parser.add_argument('--linear_patch', type=str, default="2d", choices=["2d", "3d"],
-                        help="linear projection of flattened patches.")
-    parser.add_argument('--sim_header', type=str, default="meanP",
-                        choices=["meanP", "seqLSTM", "seqTransf", "tightTransf"],
-                        help="choice a similarity header.")
-    parser.add_argument('--stage', type=str, default="stage1",choices=["stage1", "stage1"],
-                        help="choose pretrain stage.")
-    parser.add_argument('--train_length', type=int, default=0, help="length of train dateset ")
-    parser.add_argument('--use_rank', type=bool, default=True, help="whether to use rank of hard_video ")
-    parser.add_argument('--use_tag', type=bool, default=True, help="whether to use tag model")
-    parser.add_argument('--max_rank', type=int, default=50, help="max rank for hard video")
     args = parser.parse_args()
 
     # Check paramenters
     if args.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
             args.gradient_accumulation_steps))
-    if not args.do_train and not args.do_eval and not args.do_pretrain and not args.do_params:
-        raise ValueError("At least one of `do_train` or `do_eval` or 'do_pretrain' 'do_params' must be True.")
+    if not args.do_train and not args.do_eval and not args.do_params:
+        raise ValueError("At least one of `do_train` or `do_eval` or 'do_params' must be True.")
 
     args.batch_size = int(args.batch_size / args.gradient_accumulation_steps)
 
@@ -159,8 +121,9 @@ def set_seed_logger(args):
         os.makedirs(args.output_dir, exist_ok=True)
 
     logger = get_logger(os.path.join(args.output_dir, "log.txt"))
-
     if args.local_rank == 0:
+        if args.logdir:
+            args.writer = SummaryWriter(args.logdir)
         logger.info("Effective parameters:")
         for key in sorted(args.__dict__):
             logger.info("  <<< {}: {}".format(key, args.__dict__[key]))
@@ -193,9 +156,15 @@ def init_model(args, device, n_gpu, local_rank):
 
     # Prepare model
     cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed')
-    model = BirdModel.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
-                                      task_config=args)
-
+    if args.task == "retrieval_VT":
+        model = BirdModel_VT.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
+                                             task_config=args)
+    elif args.task == "retrieval":
+        model = BirdModel.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
+                                          task_config=args)
+    else:
+        raise Exception('wrong task! task should in [retrieve_VT, retrieve]')
+    # args.writer.add_graph(model)
     model.to(device)
 
     return model
@@ -211,14 +180,15 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
     decay_param_tp = [(n, p) for n, p in param_optimizer if not any(nd in n for nd in no_decay)]
     no_decay_param_tp = [(n, p) for n, p in param_optimizer if any(nd in n for nd in no_decay)]
 
-    decay_clip_param_tp = [(n, p) for n, p in decay_param_tp if "clip." in n]
-    decay_chinesebert_param_tp = [(n, p) for n, p in decay_param_tp if "chinese_bert." in n]
-    decay_noclip_param_tp = [(n, p) for n, p in decay_param_tp if ("clip." not in n) and ("chinese_bert." not in n)]
+    decay_clip_param_tp = [(n, p) for n, p in decay_param_tp if "visual_encoder.visual" in n]
+    decay_chinesebert_param_tp = [(n, p) for n, p in decay_param_tp if "text_encoder." in n]
+    decay_noclip_param_tp = [(n, p) for n, p in decay_param_tp if
+                             ("visual_encoder.visual" not in n) and ("text_encoder." not in n)]
 
-    no_decay_clip_param_tp = [(n, p) for n, p in no_decay_param_tp if "clip." in n]
-    no_decay_chinesebert_param_tp = [(n, p) for n, p in no_decay_param_tp if "chinese_bert." in n]
+    no_decay_clip_param_tp = [(n, p) for n, p in no_decay_param_tp if "visual_encoder.visual" in n]
+    no_decay_chinesebert_param_tp = [(n, p) for n, p in no_decay_param_tp if "text_encoder." in n]
     no_decay_noclip_param_tp = [(n, p) for n, p in no_decay_param_tp if
-                                ("clip." not in n) and ("chinese_bert." not in n)]
+                                ("visual_encoder.visual" not in n) and ("text_encoder." not in n)]
 
     weight_decay = 0.2
     optimizer_grouped_parameters = [
@@ -244,10 +214,12 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
     return optimizer, scheduler, model
 
+
 def dataloader_bird_train(args, tokenizer):
-    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_frame_lmdb',
-                                jsonpath_query ='/ai/swxdisk/data/bird/query_data_train.json',
-                                tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
+    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb',
+                                        jsonpath_query='/ai/swxdisk/data/bird/query_data_train.json',
+                                        tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames,
+                                        task=args.task)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
     dataloader = DataLoader(
         bird_trainset,
@@ -258,14 +230,14 @@ def dataloader_bird_train(args, tokenizer):
         sampler=train_sampler,
         drop_last=True,
     )
-
     return dataloader, len(bird_trainset), train_sampler
 
 
 def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_frame_lmdb',
+    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',
                                      jsonpath_query='/ai/swxdisk/data/bird/query_data_val.json',
-                                     tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
+                                     tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames,
+                                     task=args.task)
     dataloader = DataLoader(
         bird_testset,
         batch_size=args.batch_size_val,
@@ -296,8 +268,14 @@ def load_model(epoch, args, n_gpu, device, model_file=None):
         # Prepare model
         cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE),
                                                                        'distributed')
-        model = BirdModel.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
-                                          task_config=args)
+        if args.task == "retrieval":
+            model = BirdModel.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
+                                             task_config=args)
+        elif args.task == "retrieval_VT":
+            model = BirdModel_VT.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
+                                                 task_config=args)
+        else:
+            model = None
 
         model.to(device)
     else:
@@ -316,14 +294,19 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     for step, batch in enumerate(train_dataloader):
         load_finish_time = time.time()
         logger.info("data loader time:{}".format(load_finish_time - load_start_time))
+        global_step += 1
         if n_gpu == 1:
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-        query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-        pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank = batch
 
-        loss = model(query_ids, query_mask, pos_video_data, pos_video_mask, hard_video_data, hard_video_mask, \
-               pos_title_ids, pos_title_mask, hard_title_ids, hard_title_mask, hard_rank)
+        if args.task == "retrieval_VT":
+            query_ids, query_mask, video_data, video_mask, title_ids, title_mask, idx = batch
+            loss = model(query_ids, query_mask, video_data, video_mask, title_ids, title_mask, idx, global_step)
+        elif args.task == "retrieval":
+            query_ids, query_mask, video_data, video_mask, idx = batch
+            loss = model(query_ids, query_mask, video_data, video_mask, idx, global_step)
+        else:
+            raise ValueError("wrong task type:{}".format(args.task))
 
         if n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
@@ -351,13 +334,6 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             optimizer.step()
             optimizer.zero_grad()
 
-            # https://github.com/openai/CLIP/issues/46
-            if hasattr(model, 'module'):
-                torch.clamp_(model.module.clip.logit_scale.data, max=np.log(100))
-            else:
-                torch.clamp_(model.clip.logit_scale.data, max=np.log(100))
-
-            global_step += 1
             if global_step % log_step == 0 and local_rank == 0:
                 logger.info("Epoch: %d/%s, Step: %d/%d, Lr: %s, Loss: %f, Time/step: %f", epoch + 1,
                             args.epochs, step + 1,
@@ -365,35 +341,37 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
                             "-".join([str('%.9f' % itm) for itm in sorted(list(set(optimizer.get_lr())))]),
                             float(loss),
                             (time.time() - start_time) / (log_step * args.gradient_accumulation_steps))
+                if args.logdir:
+                    # args.writer.add_scalar('loss', loss.item(), global_step=global_step)
+                    args.writer.add_scalars('lr', {"lr%d" % i: itm for i, itm in enumerate(sorted(list(set(optimizer.get_lr()))))},
+                                      global_step=global_step)
                 start_time = time.time()
         load_start_time = time.time()
     total_loss = total_loss / len(train_dataloader)
     return total_loss, global_step
 
 
-def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list):
+def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list, batch_title_output_list):
     sim_matrix = []
-    # logger.info("batch_sequence_output_list:{}".format(batch_sequence_output_list))
-    # logger.info("batch_visual_output_list:{}".format(batch_visual_output_list))
-    # logger.info("batch_ocr_output_list:{}".format(batch_ocr_output_list))
-    # logger.info("batch_title_output_list:{}".format(batch_title_output_list))
+    sim_matrix_title = []
     for idx1, query_output in enumerate(batch_query_output_list):
         each_row = []
-        for idx2, visual_output in enumerate(batch_visual_output_list):
-            # print("visual shape:{},type:{}".format(visual_output.shape,type(visual_output)))
-            # print("ocr_output shape:{},type:{}".format(ocr_output.shape,type(ocr_output)))
-            # co_visual_output = co_visual_output.view(co_visual_output.size(0), video_frame, -1, co_visual_output.size(-1))
-            # co_visual_output = co_visual_output[:, :, 0, :]
-            b1b2_logits = model.get_similarity_logits(query_output, visual_output)
-
+        title_each_row = []
+        for idx2, (visual_output, title_output) in enumerate(zip(batch_visual_output_list, batch_title_output_list)):
+            b1b2_logits = model.loose_similarity(query_output, visual_output)
+            title_logits = model.loose_similarity(query_output, title_output)
             b1b2_logits = b1b2_logits.cpu().detach().numpy()
+            title_logits = title_logits.cpu().detach().numpy()
             each_row.append(b1b2_logits)
+            title_each_row.append(title_logits)
 
         each_row = np.concatenate(tuple(each_row), axis=-1)
+        title_each_row = np.concatenate(tuple(title_each_row), axis=-1)
         # sim_matrix.append(preprocessing.scale(each_row, axis=1))
         sim_matrix.append(each_row)
+        sim_matrix_title.append(title_each_row)
     # logger.info("sim_matrix:{}".format(sim_matrix))
-    return sim_matrix
+    return sim_matrix, sim_matrix_title
 
 
 def eval_epoch(args, model, test_dataloader, device, n_gpu):
@@ -405,45 +383,41 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
     model.eval()
     with torch.no_grad():
         batch_query_output_list, batch_visual_output_list = [], []
+        batch_title_output_list = []
         # ----------------------------
         # 1. cache the features
         # ----------------------------
         for bid, batch in enumerate(test_dataloader):
             batch = tuple(t.to(device) for t in batch)
-            query_ids, query_mask, video, video_mask, title_ids, title_mask = batch
-            logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
-            logger.info("video.shape:{}".format(video.shape))
-            b, _, num_frame, *_t = video.shape
-            logger.info("eval video.shape:{}".format(video.shape))
-            query_output = model.get_sequence_output(query_ids, query_mask, shaped=False)
-            visual_output = model.get_visual_output(video, video_mask, shaped=False)
-            title_output = model.get_sequence_output(title_ids, title_mask, shaped=False)
-            _, visual_output = model.co_attention_model(title_output, visual_output)
-            visual_output = torch.sum(visual_output, dim=1) / visual_output.size(1)
-            # co_sequence_output = co_sequence_output[:, 0, :]
-            # co_sequence_output = co_sequence_output.view(co_sequence_output.size(0), -1, co_sequence_output.size(-1))
-            #
-            # co_visual_output = co_visual_output.view(co_visual_output.size(0), num_frame, -1, co_visual_output.size(-1))
-            # co_visual_output = co_visual_output[:, :, 0, :]
-            # visual_output = co_visual_output
+            if args.task == "retrieval_VT":
+                query_ids, query_mask, video, video_mask, title_ids, title_mask = batch
+            elif args.task == "retrieval":
+                query_ids, query_mask, video, video_mask = batch
+            else:
+                raise ValueError("wrong task type:{}".format(args.task))
 
-            logger.info("sequence_output.shape:{}".format(query_output.shape))
+            logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
+
+            bs, num_frame, channel, h, w = video.shape
+            video = video.view(bs * num_frame, channel, h, w)
+            logger.info("eval video.shape:{}".format(video.shape))
+            query_output = model.get_sequence_output(query_ids, query_mask)
+            visual_output = model.visual_encoder(video, video_mask, num_frame)
+            if args.task == "retrieval_VT":
+                title_output = model.get_sequence_output(title_ids, title_mask)
+                logger.info("title_output.shape:{}".format(title_output.shape))
+            elif args.task == "retrieval":
+                title_output = torch.zeros_like(query_output)
+            else:
+                raise ValueError("wrong task type:{}".format(args.task))
+
+            logger.info("query_output.shape:{}".format(query_output.shape))
             logger.info("visual_output.shape:{}".format(visual_output.shape))
 
-            # logger.info("sequence_output.shape:{}".format(sequence_output.shape))
-            # logger.info("visual_output.shape:{}".format(visual_output.shape))
             batch_query_output_list.append(query_output)
             batch_visual_output_list.append(visual_output)
+            batch_title_output_list.append(title_output)
 
-            # logger.info("eval step:{}/{}".format(bid, len(test_dataloader)))
-        # logger.info("batch_sequence_output_list.len:{},shape:{}".format(len(batch_sequence_output_list),
-        #                                                                 batch_sequence_output_list[0].shape))
-        # logger.info("batch_visual_output_list.shape:{},shape:{}".format(len(batch_visual_output_list),
-        #                                                                 batch_visual_output_list[0].shape))
-        # logger.info("batch_ocr_output_list.shape:{},shape:{}".format(len(batch_ocr_output_list),
-        #                                                              batch_ocr_output_list[0].shape))
-        # logger.info("batch_title_output_list.shape:{},shape:{}".format(len(batch_title_output_list),
-        #                                                                batch_title_output_list[0].shape))
         # ----------------------------------
         # 2. calculate the similarity
         # ----------------------------------
@@ -453,6 +427,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             device_ids = list(range(n_gpu))
             batch_t_output_splits = []
             batch_v_output_splits = []
+            batch_title_output_splits = []
             bacth_len = len(batch_query_output_list)
             split_len = (bacth_len + n_gpu - 1) // n_gpu
             for dev_id in device_ids:
@@ -460,6 +435,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                 if dev_id == 0:
                     batch_t_output_splits.append(batch_query_output_list[s_:e_])
                     batch_v_output_splits.append(batch_visual_output_list)
+                    batch_title_output_splits.append(batch_title_output_list)
                 else:
                     devc = torch.device('cuda:{}'.format(str(dev_id)))
 
@@ -467,27 +443,34 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_t_output_splits.append(devc_batch_list)
                     devc_batch_list = [b.to(devc) for b in batch_visual_output_list]
                     batch_v_output_splits.append(devc_batch_list)
+                    devc_batch_list = [b.to(devc) for b in batch_title_output_list]
+                    batch_title_output_splits.append(devc_batch_list)
 
-            parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id]) for dev_id in device_ids]
+            parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id],
+                                      batch_title_output_splits[dev_id]) for dev_id in device_ids]
             parallel_outputs_tuple = parallel_apply(_run_on_single_gpu, model, parameters_tuple_list, device_ids)
             sim_matrix = []
+            sim_matrix_title = []
             for idx in range(len(parallel_outputs_tuple)):
-                parallel_outputs = parallel_outputs_tuple[idx]
+                parallel_outputs, parallel_outputs_title = parallel_outputs_tuple[idx]
                 sim_matrix += parallel_outputs
+                sim_matrix_title += parallel_outputs_title
             sim_matrix = np.concatenate(tuple(sim_matrix), axis=0)
+            sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
         else:
-            sim_matrix_tuple = _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list)
-            sim_matrix = sim_matrix_tuple
+            sim_matrix_tuple = _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
+                                                  batch_title_output_list)
+            sim_matrix, sim_matrix_title = sim_matrix_tuple
             sim_matrix = np.concatenate(tuple(sim_matrix), axis=0)
+            sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
+
+        if args.task == "retrieval_VT":
+            sim_matrix = sim_matrix + sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
     # sim_matrix = get_dual_matrix(sim_matrix)
     tv_metrics = compute_metrics(sim_matrix)
     vt_metrics = compute_metrics(sim_matrix.T)
-    # tv_metrics_title = compute_metrics(sim_matrix_title)
-    # tv_metrics_all = compute_metrics(sim_matrix_all)
-    # tv_metrics_title_frame = compute_metrics(sim_matrix_title_frame)
-    # tv_metrics_title_ocr = compute_metrics(sim_matrix_title_ocr)
     logger.info('\t Length-T: {}, Length-V:{}'.format(len(sim_matrix), len(sim_matrix[0])))
 
     logger.info("Text-to-Video:")
@@ -497,25 +480,9 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
     logger.info(
         '\t>>>  V2T$R@1: {:.1f} - V2T$R@5: {:.1f} - V2T$R@10: {:.1f} - V2T$Median R: {:.1f} - V2T$Mean R: {:.1f}'.
             format(vt_metrics['R1'], vt_metrics['R5'], vt_metrics['R10'], vt_metrics['MR'], vt_metrics['MeanR']))
-    logger.info("sim_matrix:\n{}".format(sim_matrix))
-    # logger.info('\tframe>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-    #             format(tv_metrics['R1'], tv_metrics['R5'], tv_metrics['R10'], tv_metrics['MR'], tv_metrics['MeanR']))
-    # logger.info('\tocr>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-    #             format(tv_metrics_ocr['R1'], tv_metrics_ocr['R5'], tv_metrics_ocr['R10'], tv_metrics_ocr['MR'], tv_metrics_ocr['MeanR']))
-    # logger.info('\ttitle>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-    #             format(tv_metrics_title['R1'], tv_metrics_title['R5'], tv_metrics_title['R10'], tv_metrics_title['MR'], tv_metrics_title['MeanR']))
-    # logger.info('\tocr_frame>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-    #             format(tv_metrics_ocr_frame['R1'], tv_metrics_ocr_frame['R5'], tv_metrics_ocr_frame['R10'], tv_metrics_ocr_frame['MR'], tv_metrics_ocr_frame['MeanR']))
-    # logger.info('\ttitle_frame>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-    #             format(tv_metrics_title_frame['R1'], tv_metrics_title_frame['R5'], tv_metrics_title_frame['R10'], tv_metrics_title_frame['MR'], tv_metrics_title_frame['MeanR']))
-    # logger.info('\ttitle_ocr>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-    #             format(tv_metrics_title_ocr['R1'], tv_metrics_title_ocr['R5'], tv_metrics_title_ocr['R10'], tv_metrics_title_ocr['MR'], tv_metrics_title_ocr['MeanR']))
-    # logger.info('\tall>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-    #             format(tv_metrics_all['R1'], tv_metrics_all['R5'], tv_metrics_all['R10'], tv_metrics_all['MR'], tv_metrics_all['MeanR']))
 
     R1 = tv_metrics['R1']
-    return R1
-
+    return tv_metrics
 
 
 def main():
@@ -524,7 +491,6 @@ def main():
     args = set_seed_logger(args)
     device, n_gpu = init_device(args, args.local_rank)
 
-
     # 使用albert的tokenizer
     # pretrained = 'voidful/albert_chinese_base'
     pretrained = 'hfl/chinese-roberta-wwm-ext'
@@ -532,9 +498,6 @@ def main():
     # pretrained = "nghuyong/ernie-1.0"
     logger.info("tokenizer:{}".format(pretrained))
     tokenizer = BertTokenizer.from_pretrained(pretrained)
-    if args.do_train:
-        train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
-        args.train_length = train_length
 
     model = init_model(args, device, n_gpu, args.local_rank)
     ## ####################################
@@ -542,8 +505,8 @@ def main():
     ## ####################################
     '''
     assert args.freeze_layer_num <= 12 and args.freeze_layer_num >= -1
-    if hasattr(model, "clip") and args.freeze_layer_num > -1:
-        for name, param in model.clip.named_parameters():
+    if hasattr(model, "visual_encoder") and args.freeze_layer_num > -1:
+        for name, param in model.visual_encoder.named_parameters():
             # top layers always need to train
             if name.find("ln_final.") == 0 or name.find("text_projection") == 0 or name.find("logit_scale") == 0 \
                     or name.find("visual.ln_post.") == 0 or name.find("visual.proj") == 0:
@@ -560,7 +523,6 @@ def main():
                 param.requires_grad = False
     '''
 
-
     test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
 
     if args.local_rank == 0:
@@ -570,7 +532,7 @@ def main():
         logger.info("  Num steps = %d", len(test_dataloader))
 
     if args.do_train:
-        # train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
+        train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
         num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
                                         / args.gradient_accumulation_steps) * args.epochs
         # logger.info("train_dataloader len = {}".format(len(train_dataloader)))
@@ -594,27 +556,19 @@ def main():
                                                scheduler, global_step, local_rank=args.local_rank)
             if args.local_rank == 0:
                 logger.info("Epoch %d/%s Finished, Train Loss: %f", epoch + 1, args.epochs, tr_loss)
-                if epoch % 10 == 0:
+                # for name, param in model.named_parameters():
+                    # args.writer.add_histogram(name, param.clone().cpu().data.numpy(), epoch)
+                    # writer.add_histogram(name + '/grad', param.requires_grad_().clone().cpu().data.numpy(), epoch)
+                if epoch % 2 == 0:
                     ## Uncomment if want to save checkpoint
                     # save_model(epoch, args, model, type_name="")
                     # if epoch == 100:
-                        eval_epoch(args, model, test_dataloader, device, n_gpu)
-
-                    ## Run on val dataset, this process is *TIME-consuming*.
-                    # logger.info("Eval on val dataset")
-                    # # R1 = eval_epoch(args, model, val_dataloader, device, n_gpu)
-                    #
-                    # R1 = eval_epoch(args, model, test_dataloader, device, n_gpu)
-                    # if best_score <= R1:
-                    #     best_score = R1
-                    #     best_output_model_file = output_model_file
-                    # logger.info("The best model is: {}, the R1 is: {:.4f}".format(best_output_model_file, best_score))
-
-        ## Uncomment if want to test on the best checkpoint
-        # if args.local_rank == 0:
-        #     model = load_model(-1, args, n_gpu, device, model_file=best_output_model_file)
-        #     eval_epoch(args, model, test_dataloader, device, n_gpu)
-
+                    metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
+                    if args.logdir:
+                        args.writer.add_scalars('metrics', {'R1':metrics["R1"]},
+                                                global_step=epoch)
+        if args.local_rank == 0:
+            save_model(epoch, args, model, type_name="")
     elif args.do_eval:
         if args.local_rank == 0:
             eval_epoch(args, model, test_dataloader, device, n_gpu)
@@ -629,6 +583,8 @@ def main():
             flops, params = profile(model, (query_ids, query_mask, pos_video_data, pos_title_ids, pos_title_mask,))
             print('flops: %.2f G, params: %.2f M' % (flops / 1e9, params / 1e6))
             break
+    if args.local_rank == 0 and args.logdir:
+        args.writer.close()
 
 
 if __name__ == "__main__":

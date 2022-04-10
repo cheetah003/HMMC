@@ -28,7 +28,7 @@ _MODELS = {
     "ViT-L/14": "https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt",
 }
 
-def _download(url: str, root: str = os.path.expanduser("~/.cache/clip")):
+def _download(url: str, root: str = os.path.expanduser("~/.cache/visual_encoder")):
     os.makedirs(root, exist_ok=True)
     filename = os.path.basename(url)
 
@@ -348,7 +348,7 @@ class CLIP(nn.Module):
 
         if isinstance(vision_layers, (tuple, list)):
             vision_heads = vision_width * 32 // 64
-            self.visualtype = 'ResNet'
+            self.vit = False
             self.visual = ModifiedResNet(
                 layers=vision_layers,
                 output_dim=embed_dim,
@@ -357,7 +357,7 @@ class CLIP(nn.Module):
                 width=vision_width
             )
         else:
-            self.visualtype = 'ViT'
+            self.vit = True
             vision_heads = vision_width // 64
             self.visual = VisualTransformer(
                 input_resolution=image_resolution,
@@ -451,7 +451,7 @@ class CLIP(nn.Module):
         return self.visual.conv1.weight.dtype
 
     def encode_image(self, image, return_hidden=False, video_frame=-1):
-        if self.visualtype == 'ViT':
+        if self.vit:
             # logger.info("image.shape:{}".format(image.shape))
             hidden = self.visual(image.type(self.dtype), video_frame=video_frame)
             # logger.info("hidden1.shape:{}".format(hidden.shape))
@@ -527,7 +527,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, local_rank, embed_dim=768):
+def build_model(state_dict: dict, local_rank):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -545,7 +545,7 @@ def build_model(state_dict: dict, local_rank, embed_dim=768):
         assert output_width ** 2 + 1 == state_dict["visual.attnpool.positional_embedding"].shape[0]
         image_resolution = output_width * 32
 
-    # embed_dim = state_dict["text_projection"].shape[1]
+    embed_dim = state_dict["text_projection"].shape[1]
     context_length = state_dict["positional_embedding"].shape[0]
     vocab_size = state_dict["token_embedding.weight"].shape[0]
     transformer_width = state_dict["ln_final.weight"].shape[0]
@@ -574,6 +574,6 @@ def build_model(state_dict: dict, local_rank, embed_dim=768):
             del state_dict[key]
 
     # convert_weights(model)
-    # model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict)
     # return model.eval()
     return model
