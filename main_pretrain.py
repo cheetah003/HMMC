@@ -41,7 +41,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--do_params", action='store_true', help="text the params of the model.")
-    parser.add_argument('--task', type=str, default="retrieval_VT", choices=["retrieval_VT", "retrieval"],
+    parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
@@ -55,8 +55,8 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--seed', type=int, default=42, help='random seed')
     parser.add_argument('--max_words', type=int, default=32, help='')
     parser.add_argument('--max_frames', type=int, default=12, help='')
-    parser.add_argument('--contrast_num_negative', type=int, default=16384, help='Num of negative sample in queue')
-    parser.add_argument('--contrast_momentum', type=float, default=0.99, help='momentum')
+    parser.add_argument('--contrast_num_negative', type=int, default=65536, help='Num of negative sample in queue')
+    parser.add_argument('--contrast_momentum', type=float, default=0.999, help='momentum')
     parser.add_argument('--contrast_temperature', type=float, default=0.2, help='temperature')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
@@ -281,8 +281,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
 
-        video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask = batch
-        loss = model(video_data, video_mask, tag_ids, tag_mask, title_ids, title_mask, global_step)
+        video_data1, video_data2, frames, tag_ids, tag_mask, title_ids, title_mask = batch
+        loss = model(video_data1, video_data2, frames, tag_ids, tag_mask, title_ids, title_mask, global_step)
 
         if n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
@@ -318,10 +318,11 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
                             "-".join([str('%.9f' % itm) for itm in sorted(list(set(optimizer.get_lr())))]),
                             float(loss),
                             (time.time() - start_time) / (log_step * args.gradient_accumulation_steps))
-                args.writer.add_scalar('loss', loss.item(), global_step=global_step)
-                args.writer.add_scalars('lr', {"lr%d" % i: itm for i, itm in
-                                               enumerate(sorted(list(set(optimizer.get_lr()))))},
-                                        global_step=global_step)
+                if args.logdir:
+                    # args.writer.add_scalar('loss', loss.item(), global_step=global_step)
+                    args.writer.add_scalars('lr', {"lr%d" % i: itm for i, itm in
+                                                   enumerate(sorted(list(set(optimizer.get_lr()))))},
+                                            global_step=global_step)
                 start_time = time.time()
         load_start_time = time.time()
     total_loss = total_loss / len(train_dataloader)
@@ -362,36 +363,38 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
     model.eval()
     with torch.no_grad():
         batch_query_output_list, batch_visual_output_list = [], []
+        batch_title_output_list = []
         # ----------------------------
         # 1. cache the features
         # ----------------------------
         for bid, batch in enumerate(test_dataloader):
             batch = tuple(t.to(device) for t in batch)
             if args.task == "retrieval_VT":
-                query_ids, query_mask, video, video_mask, title_ids, title_mask = batch
+                query_ids, query_mask, video, video_frame, title_ids, title_mask = batch
             elif args.task == "retrieval":
-                query_ids, query_mask, video, video_mask = batch
+                query_ids, query_mask, video, video_frame = batch
             else:
                 raise ValueError("wrong task type:{}".format(args.task))
 
             logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
 
-            bs, num_frame, channel, h, w = video.shape
-            video = video.view(bs * num_frame, channel, h, w)
             logger.info("eval video.shape:{}".format(video.shape))
             query_output = model.get_sequence_output(query_ids, query_mask)
-            visual_output = model.visual_encoder(video, video_mask, num_frame)
+            visual_output = model.visual_encoder(video, video_frame)
             if args.task == "retrieval_VT":
                 title_output = model.get_sequence_output(title_ids, title_mask)
-                _, visual_output = model.co_attention_model(title_output, visual_output)
-
-            visual_output = torch.mean(visual_output, dim=1)
+                logger.info("title_output.shape:{}".format(title_output.shape))
+            elif args.task == "retrieval":
+                title_output = torch.zeros_like(query_output)
+            else:
+                raise ValueError("wrong task type:{}".format(args.task))
 
             logger.info("query_output.shape:{}".format(query_output.shape))
             logger.info("visual_output.shape:{}".format(visual_output.shape))
 
             batch_query_output_list.append(query_output)
             batch_visual_output_list.append(visual_output)
+            batch_title_output_list.append(title_output)
 
         # ----------------------------------
         # 2. calculate the similarity
@@ -402,6 +405,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             device_ids = list(range(n_gpu))
             batch_t_output_splits = []
             batch_v_output_splits = []
+            batch_title_output_splits = []
             bacth_len = len(batch_query_output_list)
             split_len = (bacth_len + n_gpu - 1) // n_gpu
             for dev_id in device_ids:
@@ -409,6 +413,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                 if dev_id == 0:
                     batch_t_output_splits.append(batch_query_output_list[s_:e_])
                     batch_v_output_splits.append(batch_visual_output_list)
+                    batch_title_output_splits.append(batch_title_output_list)
                 else:
                     devc = torch.device('cuda:{}'.format(str(dev_id)))
 
@@ -416,19 +421,29 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_t_output_splits.append(devc_batch_list)
                     devc_batch_list = [b.to(devc) for b in batch_visual_output_list]
                     batch_v_output_splits.append(devc_batch_list)
+                    devc_batch_list = [b.to(devc) for b in batch_title_output_list]
+                    batch_title_output_splits.append(devc_batch_list)
 
-            parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id]) for dev_id in
-                                     device_ids]
+            parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id],
+                                      batch_title_output_splits[dev_id]) for dev_id in device_ids]
             parallel_outputs_tuple = parallel_apply(_run_on_single_gpu, model, parameters_tuple_list, device_ids)
             sim_matrix = []
+            sim_matrix_title = []
             for idx in range(len(parallel_outputs_tuple)):
-                parallel_outputs = parallel_outputs_tuple[idx]
+                parallel_outputs, parallel_outputs_title = parallel_outputs_tuple[idx]
                 sim_matrix += parallel_outputs
+                sim_matrix_title += parallel_outputs_title
             sim_matrix = np.concatenate(tuple(sim_matrix), axis=0)
+            sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
         else:
-            sim_matrix_tuple = _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list)
-            sim_matrix = sim_matrix_tuple
+            sim_matrix_tuple = _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
+                                                  batch_title_output_list)
+            sim_matrix, sim_matrix_title = sim_matrix_tuple
             sim_matrix = np.concatenate(tuple(sim_matrix), axis=0)
+            sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
+
+        if args.task == "retrieval_VT":
+            sim_matrix = sim_matrix + sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
     # sim_matrix = get_dual_matrix(sim_matrix)
@@ -496,12 +511,14 @@ def main():
                                                scheduler, global_step, local_rank=args.local_rank)
             if args.local_rank == 0:
                 logger.info("Epoch %d/%s Finished, Train Loss: %f", epoch + 1, args.epochs, tr_loss)
-                if epoch % 2 == 0 and epoch != 0:
+                if epoch % 1 == 0 and epoch != 0:
                     # Uncomment if want to save checkpoint
-                    save_model(epoch, args, model, type_name="")
+                    if epoch % 5 == 0:
+                        save_model(epoch, args, model, type_name="")
                     # if epoch == 100:
                     metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
-                    args.writer.add_scalars('metrics', metrics, global_step=global_step)
+                    if args.logdir:
+                        args.writer.add_scalars('metrics', {'R1': metrics["R1"]}, global_step=epoch)
             torch.cuda.empty_cache()
 
     elif args.do_params:

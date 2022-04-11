@@ -46,7 +46,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--do_params", action='store_true', help="text the params of the model.")
-    parser.add_argument('--task', type=str, default="retrieval_VT", choices=["retrieval_VT", "retrieval"],
+    parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
     parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt"],
                         help="choose dataset.")
@@ -293,18 +293,19 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     load_start_time = time.time()
     for step, batch in enumerate(train_dataloader):
         load_finish_time = time.time()
-        logger.info("data loader time:{}".format(load_finish_time - load_start_time))
+        if args.local_rank == 0:
+            logger.info("data loader time:{}".format(load_finish_time - load_start_time))
         global_step += 1
         if n_gpu == 1:
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
 
         if args.task == "retrieval_VT":
-            query_ids, query_mask, video_data, video_mask, title_ids, title_mask, idx = batch
-            loss = model(query_ids, query_mask, video_data, video_mask, title_ids, title_mask, idx, global_step)
+            query_ids, query_mask, video_data, video_frame, title_ids, title_mask, idx = batch
+            loss = model(query_ids, query_mask, video_data, video_frame, title_ids, title_mask, idx, global_step)
         elif args.task == "retrieval":
-            query_ids, query_mask, video_data, video_mask, idx = batch
-            loss = model(query_ids, query_mask, video_data, video_mask, idx, global_step)
+            query_ids, query_mask, video_data, video_frame, idx = batch
+            loss = model(query_ids, query_mask, video_data, video_frame, idx, global_step)
         else:
             raise ValueError("wrong task type:{}".format(args.task))
 
@@ -320,7 +321,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             loss.backward()
         total_loss += float(loss)
         forward_and_backward_time = time.time()
-        logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
+        if args.local_rank == 0:
+            logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
             if args.fp16_opt_level != "O0":
@@ -390,19 +392,17 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         for bid, batch in enumerate(test_dataloader):
             batch = tuple(t.to(device) for t in batch)
             if args.task == "retrieval_VT":
-                query_ids, query_mask, video, video_mask, title_ids, title_mask = batch
+                query_ids, query_mask, video, video_frame, title_ids, title_mask = batch
             elif args.task == "retrieval":
-                query_ids, query_mask, video, video_mask = batch
+                query_ids, query_mask, video, video_frame = batch
             else:
                 raise ValueError("wrong task type:{}".format(args.task))
 
             logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
 
-            bs, num_frame, channel, h, w = video.shape
-            video = video.view(bs * num_frame, channel, h, w)
             logger.info("eval video.shape:{}".format(video.shape))
             query_output = model.get_sequence_output(query_ids, query_mask)
-            visual_output = model.visual_encoder(video, video_mask, num_frame)
+            visual_output = model.visual_encoder(video, video_frame)
             if args.task == "retrieval_VT":
                 title_output = model.get_sequence_output(title_ids, title_mask)
                 logger.info("title_output.shape:{}".format(title_output.shape))
@@ -565,8 +565,7 @@ def main():
                     # if epoch == 100:
                     metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
                     if args.logdir:
-                        args.writer.add_scalars('metrics', {'R1':metrics["R1"]},
-                                                global_step=epoch)
+                        args.writer.add_scalars('metrics', {'R1': metrics["R1"]}, global_step=epoch)
         if args.local_rank == 0:
             save_model(epoch, args, model, type_name="")
     elif args.do_eval:

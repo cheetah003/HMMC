@@ -174,7 +174,7 @@ class dataload_bird_pretrain(VisionDataset):
             # print("[{}]frame_data.shape:{}".format(step, frame_data.shape))
             video_list.append(frame_data)
         video_data = np.stack(video_list)
-        print("video data.shape:{}".format(video_data.shape))
+        # print("video data.shape:{}".format(video_data.shape))
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
         video_data = video_data.reshape([2*max_frames, 3, self.resolution, self.resolution])
@@ -183,7 +183,8 @@ class dataload_bird_pretrain(VisionDataset):
         if self.max_frames == -1:
             # dynamic frame needs pad
             if max_frames < max_dynamic_pretrain_frames:
-                pad = np.zeros([max_dynamic_pretrain_frames - max_frames, 3, self.resolution, self.resolution])
+                pad = np.zeros([max_dynamic_pretrain_frames - max_frames, 3, self.resolution, self.resolution],
+                               dtype=np.float32)
                 video_data1 = np.concatenate((video_data1, pad), axis=0)
                 video_data2 = np.concatenate((video_data2, pad), axis=0)
 
@@ -203,11 +204,8 @@ class dataload_bird_pretrain(VisionDataset):
         if self.max_frames == -1:
             # dynamic frame
             max_frames = min(max(item["duration"] // 4, 2), max_dynamic_pretrain_frames)
-            video_mask = np.concatenate((np.ones(max_frames, dtype=int),
-                                         np.zeros(max_dynamic_pretrain_frames - max_frames, dtype=int)))
         else:
             max_frames = self.max_frames
-            video_mask = np.ones(max_frames, dtype=int)
         video_key = "Video" + item['docid']
         video_data1, video_data2 = self._get_video(video_key, max_frames)
 
@@ -217,7 +215,7 @@ class dataload_bird_pretrain(VisionDataset):
         # print("video[{}]:{}".format(index, item['video_id']))
         tag_ids, tag_mask, _ = self._get_text(tag_text)
         title_ids, title_mask, _ = self._get_text(title_text)
-        return video_data1, video_data2, video_mask, tag_ids, tag_mask, title_ids, title_mask
+        return video_data1, video_data2, max_frames, tag_ids, tag_mask, title_ids, title_mask
 
     def __len__(self) -> int:
         return self._length
@@ -336,7 +334,8 @@ class dataload_bird_train(VisionDataset):
         if self.max_frames == -1:
             # dynamic frame needs pad
             if max_frames < max_dynamic_train_frames:
-                pad = np.zeros([max_dynamic_train_frames - max_frames, 3, self.resolution, self.resolution])
+                pad = np.zeros([max_dynamic_train_frames - max_frames, 3, self.resolution, self.resolution],
+                               dtype=np.float32)
                 video_data = np.concatenate((video_data, pad), axis=0)
 
         return video_data
@@ -355,11 +354,8 @@ class dataload_bird_train(VisionDataset):
         if self.max_frames == -1:
             # dynamic frame
             max_frames = min(max(item["duration"] // 2, 3), max_dynamic_train_frames)
-            video_mask = np.concatenate((np.ones(max_frames, dtype=int), np.zeros(max_dynamic_train_frames - max_frames,
-                                                                                  dtype=int)))
         else:
             max_frames = self.max_frames
-            video_mask = np.ones(max_frames, dtype=int)
         # query, pos_item = self._get_pos_pair(item)
         query = item['query']
         videoid = "Video" + item['docid']
@@ -369,9 +365,9 @@ class dataload_bird_train(VisionDataset):
         if self.task == "retrieval_VT":
             title = item['title']
             title_ids, title_mask, _ = self._get_text(title)
-            return query_ids, query_mask, video_data, video_mask, title_ids, title_mask, index
+            return query_ids, query_mask, video_data, max_frames, title_ids, title_mask, index
         else:
-            return query_ids, query_mask, video_data, video_mask, index
+            return query_ids, query_mask, video_data, max_frames, index
 
     def __len__(self) -> int:
         return self._length
@@ -476,7 +472,8 @@ class dataload_bird_val(VisionDataset):
         if self.max_frames == -1:
             # dynamic frame needs pad
             if max_frames < max_dynamic_val_frames:
-                pad = np.zeros([max_dynamic_val_frames - max_frames, 3, self.resolution, self.resolution])
+                pad = np.zeros([max_dynamic_val_frames - max_frames, 3, self.resolution, self.resolution],
+                               dtype=np.float32)
                 video_data = np.concatenate((video_data, pad), axis=0)
 
         return video_data
@@ -496,12 +493,9 @@ class dataload_bird_val(VisionDataset):
         videoid = "Video" + pos_item["docid"]
         if self.max_frames == -1:
             # dynamic frame
-            max_frames = min(max(item["duration"] // 2, 3), max_dynamic_val_frames)
-            video_mask = np.concatenate((np.ones(max_frames, dtype=int), np.zeros(max_dynamic_val_frames - max_frames,
-                                                                                  dtype=int)))
+            max_frames = min(max(pos_item["duration"] // 2, 3), max_dynamic_val_frames)
         else:
             max_frames = self.max_frames
-            video_mask = np.ones(max_frames, dtype=int)
         video_data = self._get_video(videoid, max_frames)
         # query = "关于 " + query + " 的视频"
         # print("[{}]query:{},title:{},video:{}".format(index, query, pos_title, videoid))
@@ -511,9 +505,9 @@ class dataload_bird_val(VisionDataset):
         if self.task == "retrieval_VT":
             title = pos_item['title']
             title_ids, title_mask, _ = self._get_text(title)
-            return query_ids, query_mask, video_data, video_mask, title_ids, title_mask
+            return query_ids, query_mask, video_data, max_frames, title_ids, title_mask
         else:
-            return query_ids, query_mask, video_data, video_mask
+            return query_ids, query_mask, video_data, max_frames
 
     def __len__(self) -> int:
         return self._length

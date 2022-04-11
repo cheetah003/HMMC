@@ -311,8 +311,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
         return F.cross_entropy(logits, labels)
 
-    def forward(self, video_data1, video_data2, video_mask, tag_ids, tag_mask, title_ids, title_mask, global_step):
-        video_mask = video_mask.view(-1, video_mask.shape[-1])
+    def forward(self, video_data1, video_data2, video_frame, tag_ids, tag_mask, title_ids, title_mask, global_step):
         tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
         tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
         title_ids = title_ids.view(-1, title_ids.shape[-1])
@@ -322,20 +321,16 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         video2 = torch.as_tensor(video_data2)
 
         if self.rank == 0:
-            logger.info("video1.shape:{},video_mask1.shape:{}".format(video1.shape, video_mask.shape))
-
-        bs, video_frame, channel, h, w = video1.shape
-        video1 = video1.view(bs * video_frame, channel, h, w)
-        video2 = video2.view(bs * video_frame, channel, h, w)
+            logger.info("video1.shape:{}, dtype:{}".format(video1.shape, video1.dtype))
 
         if self.training:
             loss = 0.0
-            v1_fea = self.visual_encoder(video1, video_mask, video_frame)
-            v2_fea = self.visual_encoder(video2, video_mask, video_frame)
+            v1_fea = self.visual_encoder(video1, video_frame)
+            v2_fea = self.visual_encoder(video2, video_frame)
             tag_fea = self.get_sequence_output(tag_ids, tag_mask)
             title_fea = self.get_sequence_output(title_ids, title_mask)
 
-            #for video self supervised learning
+            # for video self supervised learning
             # [bs,hidden_size]
             v1_proj = self.v_projector(v1_fea)
             v1_pred = self.v_predictor(v1_proj)
@@ -359,14 +354,15 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                 title_fea_k = self.get_sequence_output(title_ids, title_mask, is_momentum=True)
                 title_proj_k = self.t_projector_k(title_fea_k)
                 #
-                v1_fea_k = self.visual_encoder_k(video1, video_mask, video_frame)
-                v2_fea_k = self.visual_encoder_k(video2, video_mask, video_frame)
+                v1_fea_k = self.visual_encoder_k(video1, video_frame)
+                v2_fea_k = self.visual_encoder_k(video2, video_frame)
                 v1_proj_k = self.v_projector_k(v1_fea_k)
                 v2_proj_k = self.v_projector_k(v2_fea_k)
 
             # compute loss
             if self.rank == 0:
-                logger.info("dtype: v1_fea:{},tag_fea:{},title_fea:{}".format(v1_fea.dtype,tag_fea.dtype,title_fea.dtype))
+                logger.info(
+                    "dtype: v1_fea:{},tag_fea:{},title_fea:{}".format(v1_fea.dtype, tag_fea.dtype, title_fea.dtype))
 
             # in batch loss
             # all_v1_proj = dist_collect(v1_proj)
@@ -388,15 +384,15 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             #
             # inbatch_loss = (v1_tag_loss + v1_title_loss + v2_tag_loss + v2_title_loss) / 4
 
-            # video queue loss
+            # single modality: video queue loss
             v_queue_loss = self.contrastive_loss(v1_pred, v2_proj_k, self.queue_v2_proj_ng) \
-                                + self.contrastive_loss(v2_pred, v1_proj_k, self.queue_v1_proj_ng)
+                           + self.contrastive_loss(v2_pred, v1_proj_k, self.queue_v1_proj_ng)
 
-            # cross modality queue loss
+            # cross modality: queue loss
             v1_tag_queue_loss = self.contrastive_loss(v1_proj, tag_proj_k, self.queue_tag_proj_ng) \
-                           + self.contrastive_loss(tag_proj, v1_proj_k, self.queue_v1_proj_ng)
+                                + self.contrastive_loss(tag_proj, v1_proj_k, self.queue_v1_proj_ng)
             v1_title_queue_loss = self.contrastive_loss(v1_proj, title_proj_k, self.queue_title_proj_ng) \
-                                + self.contrastive_loss(title_proj, v1_proj_k, self.queue_v1_proj_ng)
+                                  + self.contrastive_loss(title_proj, v1_proj_k, self.queue_v1_proj_ng)
             v2_tag_queue_loss = self.contrastive_loss(v2_proj, tag_proj_k, self.queue_tag_proj_ng) \
                                 + self.contrastive_loss(tag_proj, v2_proj_k, self.queue_v2_proj_ng)
             v2_title_queue_loss = self.contrastive_loss(v2_proj, title_proj_k, self.queue_title_proj_ng) \
@@ -415,9 +411,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             # loss += inbatch_loss + v_queue_loss + cross_queue_loss + mlm_loss
             loss += v_queue_loss + cross_queue_loss + mlm_loss
             if self.rank == 0:
-                logger.info("v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}".format(
-                                            v_queue_loss, cross_queue_loss, mlm_loss))
-                logger.info("loss:{}".format(loss))
+                logger.info("loss:{},v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}".format(loss,
+                                                                            v_queue_loss, cross_queue_loss, mlm_loss))
                 if self.task_config.logdir:
                     loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss),
                                  "cross_queue_loss": float(cross_queue_loss), "mlm_loss": float(mlm_loss)}
@@ -433,7 +428,7 @@ class BirdModel(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.0101)], dtype=torch.float32), requires_grad=True)
         ################## chinese text Encoder
         # pretrained = 'voidful/albert_chinese_base'
         pretrained = 'hfl/chinese-roberta-wwm-ext'
@@ -452,20 +447,18 @@ class BirdModel(BirdPreTrainedModel):
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
 
-    def forward(self, query_ids, query_mask, video_data, video_mask, idx, global_step):
+    def forward(self, query_ids, query_mask, video_data, video_frame, idx, global_step):
         query_ids = query_ids.view(-1, query_ids.shape[-1])
         query_mask = query_mask.view(-1, query_mask.shape[-1])
-        video_mask = video_mask.view(-1, video_mask.shape[-1])
         # T x 3 x H x W
         video = torch.as_tensor(video_data)
-        bs, video_frame, channel, h, w = video.shape
-        video = video.view(bs * video_frame, channel, h, w)
+        if self.rank == 0:
+            logger.info("video.shape:{}, dtype:{}".format(video.shape, video.dtype))
         if self.training:
             loss = 0.0
             query_output = self.get_sequence_output(query_ids, query_mask)
-            visual_output = self.visual_encoder(video, video_mask, video_frame)
+            visual_output = self.visual_encoder(video, video_frame)
             if self.rank == 0:
-                logger.info("video.shape:[{},{},{},{},{}]".format(bs, video_frame, channel, h, w))
                 logger.info("query_output.shape:{},dtype:{}".format(query_output.shape, query_output.dtype))
                 logger.info("visual_output.shape:{},dtype:{}".format(visual_output.shape, visual_output.dtype))
 
@@ -477,7 +470,8 @@ class BirdModel(BirdPreTrainedModel):
             sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
             loss += sim_loss
             if self.rank == 0:
-                logger.info("sim_loss:{},type:{},sim_matrix.shape:{}".format(sim_loss, sim_loss.dtype, sim_matrix.shape))
+                logger.info(
+                    "sim_loss:{},type:{},sim_matrix.shape:{}".format(sim_loss, sim_loss.dtype, sim_matrix.shape))
 
                 if self.task_config.logdir:
                     self.task_config.writer.add_scalar('loss', float(loss), global_step=global_step)
@@ -492,7 +486,7 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.0101)], dtype=torch.float32), requires_grad=True)
         ################## chinese text Encoder
         # pretrained = 'voidful/albert_chinese_base'
         pretrained = 'hfl/chinese-roberta-wwm-ext'
@@ -511,21 +505,18 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
 
-    def forward(self, query_ids, query_mask, video_data, video_mask, title_ids, title_mask, idx, global_step):
+    def forward(self, query_ids, query_mask, video_data, video_frame, title_ids, title_mask, idx, global_step):
         query_ids = query_ids.view(-1, query_ids.shape[-1])
         query_mask = query_mask.view(-1, query_mask.shape[-1])
         title_ids = title_ids.view(-1, title_ids.shape[-1])
         title_mask = title_mask.view(-1, title_mask.shape[-1])
-        video_mask = video_mask.view(-1, video_mask.shape[-1])
         # T x 3 x H x W
         video = torch.as_tensor(video_data)
-        bs, video_frame, channel, h, w = video.shape
-        video = video.view(bs * video_frame, channel, h, w)
         if self.training:
             loss = 0.0
             query_output = self.get_sequence_output(query_ids, query_mask)
             title_output = self.get_sequence_output(title_ids, title_mask)
-            visual_output = self.visual_encoder(video, video_mask, video_frame)
+            visual_output = self.visual_encoder(video, video_frame)
 
             visual_output = dist_collect(visual_output).squeeze(1)
             query_output = dist_collect(query_output).squeeze(1)
@@ -542,7 +533,8 @@ class BirdModel_VT(BirdPreTrainedModel):
             if self.rank == 0:
                 logger.info("sim_loss:{},sim_loss_title:{}".format(sim_loss, sim_loss_title))
                 if self.task_config.logdir:
-                    loss_item = {"loss": float(loss), "sim_loss": float(sim_loss), "sim_loss_title": float(sim_loss_title)}
+                    loss_item = {"loss": float(loss), "sim_loss": float(sim_loss),
+                                 "sim_loss_title": float(sim_loss_title)}
                     # self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
                     self.task_config.writer.add_scalar('loss', float(loss), global_step=global_step)
             return loss
