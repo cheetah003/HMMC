@@ -57,7 +57,9 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--max_frames', type=int, default=12, help='')
     parser.add_argument('--contrast_num_negative', type=int, default=65536, help='Num of negative sample in queue')
     parser.add_argument('--contrast_momentum', type=float, default=0.999, help='momentum')
-    parser.add_argument('--contrast_temperature', type=float, default=0.2, help='temperature')
+    parser.add_argument('--contrast_temperature', type=float, default=0.07, help='temperature')
+    parser.add_argument('--cross_MLP', type=str, default="NO_MLP", choices=["NO_MLP", "V_MLP", "T_MLP", "VT_MLP"],
+                        help='whether use MLP in cross modality')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,

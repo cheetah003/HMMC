@@ -138,14 +138,18 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                             ]
         self.copy_params()
         ################## create queue
-        self.register_buffer("queue_v1_proj_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_v2_proj_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_title_proj_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_tag_proj_ng", torch.randn(768, self.contrast_num_negative))
-        self.queue_v1_proj_ng = F.normalize(self.queue_v1_proj_ng, dim=0)
-        self.queue_v2_proj_ng = F.normalize(self.queue_v2_proj_ng, dim=0)
-        self.queue_title_proj_ng = F.normalize(self.queue_title_proj_ng, dim=0)
-        self.queue_tag_proj_ng = F.normalize(self.queue_tag_proj_ng, dim=0)
+        self.register_buffer("queue_v1_self_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_v2_self_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_v1_cross_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_v2_cross_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_title_cross_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_tag_cross_ng", torch.randn(768, self.contrast_num_negative))
+        self.queue_v1_self_ng = F.normalize(self.queue_v1_self_ng, dim=0)
+        self.queue_v2_self_ng = F.normalize(self.queue_v2_self_ng, dim=0)
+        self.queue_v1_cross_ng = F.normalize(self.queue_v1_cross_ng, dim=0)
+        self.queue_v2_cross_ng = F.normalize(self.queue_v2_cross_ng, dim=0)
+        self.queue_title_cross_ng = F.normalize(self.queue_title_cross_ng, dim=0)
+        self.queue_tag_cross_ng = F.normalize(self.queue_tag_cross_ng, dim=0)
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
@@ -251,30 +255,36 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                 param_k.data = param_k.data * self.contrast_momentum + param.data * (1. - self.contrast_momentum)
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self, v1_proj_k, v2_proj_k, tag_proj_k, title_proj_k):
+    def _dequeue_and_enqueue(self, v1_self_k, v2_self_k, v1_cross_k, v2_cross_k, tag_cross_k, title_cross_k):
 
         # gather keys before updating queue
-        v1_proj_k = dist_collect(v1_proj_k).squeeze()
-        v1_proj_k = F.normalize(v1_proj_k, dim=1)
-        v2_proj_k = dist_collect(v2_proj_k).squeeze()
-        v2_proj_k = F.normalize(v2_proj_k, dim=1)
-        tag_proj_k = dist_collect(tag_proj_k).squeeze()
-        tag_proj_k = F.normalize(tag_proj_k, dim=1)
-        title_proj_k = dist_collect(title_proj_k).squeeze()
-        title_proj_k = F.normalize(title_proj_k, dim=1)
+        v1_self_k = dist_collect(v1_self_k).squeeze()
+        v1_self_k = F.normalize(v1_self_k, dim=1)
+        v2_self_k = dist_collect(v2_self_k).squeeze()
+        v2_self_k = F.normalize(v2_self_k, dim=1)
+        v1_cross_k = dist_collect(v1_cross_k).squeeze()
+        v1_cross_k = F.normalize(v1_cross_k, dim=1)
+        v2_cross_k = dist_collect(v2_cross_k).squeeze()
+        v2_cross_k = F.normalize(v2_cross_k, dim=1)
+        tag_cross_k = dist_collect(tag_cross_k).squeeze()
+        tag_cross_k = F.normalize(tag_cross_k, dim=1)
+        title_cross_k = dist_collect(title_cross_k).squeeze()
+        title_cross_k = F.normalize(title_cross_k, dim=1)
 
-        batch_size = v1_proj_k.size(0)
+        batch_size = v1_self_k.size(0)
         ptr = int(self.queue_ptr)
         if self.rank == 0:
             logger.info(
                 "begin>>>>: ptr:{},batch_size:{},queue_size:{}".format(ptr, batch_size, self.contrast_num_negative))
-            logger.info("v1_proj_k.shape:{},tag_proj_k.shape:{}".format(v1_proj_k.shape, tag_proj_k.shape))
+            logger.info("v1_self_k.shape:{},tag_cross_k.shape:{}".format(v1_self_k.shape, tag_cross_k.shape))
 
         # replace the keys at ptr (dequeue and enqueue)
-        self.queue_v1_proj_ng[:, ptr:ptr + batch_size] = v1_proj_k.T
-        self.queue_v2_proj_ng[:, ptr:ptr + batch_size] = v2_proj_k.T
-        self.queue_tag_proj_ng[:, ptr:ptr + batch_size] = tag_proj_k.T
-        self.queue_title_proj_ng[:, ptr:ptr + batch_size] = title_proj_k.T
+        self.queue_v1_self_ng[:, ptr:ptr + batch_size] = v1_self_k.T
+        self.queue_v2_self_ng[:, ptr:ptr + batch_size] = v2_self_k.T
+        self.queue_v1_cross_ng[:, ptr:ptr + batch_size] = v1_cross_k.T
+        self.queue_v2_cross_ng[:, ptr:ptr + batch_size] = v2_cross_k.T
+        self.queue_tag_cross_ng[:, ptr:ptr + batch_size] = tag_cross_k.T
+        self.queue_title_cross_ng[:, ptr:ptr + batch_size] = title_cross_k.T
 
         # move pointer
         ptr = (ptr + batch_size) % self.contrast_num_negative
@@ -311,6 +321,37 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
         return F.cross_entropy(logits, labels)
 
+    def get_cross_fea(self, v1_fea, v2_fea, v1_proj, v2_proj, tag_fea, title_fea, is_momentum=False):
+        if self.task_config.cross_MLP == "VT_MLP":
+            v1_cross = v1_proj
+            v2_cross = v2_proj
+            if is_momentum:
+                tag_cross = self.t_projector_k(tag_fea)
+                title_cross = self.t_projector_k(title_fea)
+            else:
+                tag_cross = self.t_projector(tag_fea)
+                title_cross = self.t_projector(title_fea)
+        elif self.task_config.cross_MLP == "V_MLP":
+            v1_cross = v1_proj
+            v2_cross = v2_proj
+            tag_cross = tag_fea
+            title_cross = title_fea
+        elif self.task_config.cross_MLP == "T_MLP":
+            v1_cross = v1_fea
+            v2_cross = v2_fea
+            if is_momentum:
+                tag_cross = self.t_projector_k(tag_fea)
+                title_cross = self.t_projector_k(title_fea)
+            else:
+                tag_cross = self.t_projector(tag_fea)
+                title_cross = self.t_projector(title_fea)
+        else:
+            v1_cross = v1_fea
+            v2_cross = v2_fea
+            tag_cross = tag_fea
+            title_cross = title_fea
+        return v1_cross, v2_cross, tag_cross, title_cross
+
     def forward(self, video_data1, video_data2, video_frame, tag_ids, tag_mask, title_ids, title_mask, global_step):
         tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
         tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
@@ -338,8 +379,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             v2_proj = self.v_projector(v2_fea)
             v2_pred = self.v_predictor(v2_proj)
             # [bs,hidden_size]
-            tag_proj = self.t_projector(tag_fea)
-            title_proj = self.t_projector(title_fea)
+            v1_cross, v2_cross, tag_cross, title_cross = self.get_cross_fea(v1_fea, v2_fea, v1_proj,
+                                                                            v2_proj, tag_fea, title_fea)
 
             # if self.rank == 0:
             #     logger.info("video1_fea.shape:{}".format(v1_fea.shape))
@@ -350,57 +391,36 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             with torch.no_grad():  # no gradient to keys
                 self._momentum_update()  # update the key encoder
                 tag_fea_k = self.get_sequence_output(tag_ids, tag_mask, is_momentum=True)
-                tag_proj_k = self.t_projector_k(tag_fea_k)
                 title_fea_k = self.get_sequence_output(title_ids, title_mask, is_momentum=True)
-                title_proj_k = self.t_projector_k(title_fea_k)
                 #
                 v1_fea_k = self.visual_encoder_k(video1, video_frame)
                 v2_fea_k = self.visual_encoder_k(video2, video_frame)
                 v1_proj_k = self.v_projector_k(v1_fea_k)
                 v2_proj_k = self.v_projector_k(v2_fea_k)
+                v1_cross_k, v2_cross_k, tag_cross_k, title_cross_k = self.get_cross_fea(v1_fea_k, v2_fea_k,
+                                                        v1_proj_k, v2_proj_k, tag_fea_k, title_fea_k, is_momentum=True)
 
             # compute loss
             if self.rank == 0:
                 logger.info(
                     "dtype: v1_fea:{},tag_fea:{},title_fea:{}".format(v1_fea.dtype, tag_fea.dtype, title_fea.dtype))
-
-            # in batch loss
-            # all_v1_proj = dist_collect(v1_proj)
-            # all_v2_proj = dist_collect(v2_proj)
-            # all_tag_proj = dist_collect(tag_proj)
-            # all_title_proj = dist_collect(title_proj)
-            #
-            # sim_matrix = self.loose_similarity(all_v1_proj, all_tag_proj)
-            # v1_tag_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            #
-            # sim_matrix = self.loose_similarity(all_v1_proj, all_title_proj)
-            # v1_title_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            #
-            # sim_matrix = self.loose_similarity(all_v2_proj, all_tag_proj)
-            # v2_tag_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            #
-            # sim_matrix = self.loose_similarity(all_v2_proj, all_title_proj)
-            # v2_title_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            #
-            # inbatch_loss = (v1_tag_loss + v1_title_loss + v2_tag_loss + v2_title_loss) / 4
-
             # single modality: video queue loss
-            v_queue_loss = self.contrastive_loss(v1_pred, v2_proj_k, self.queue_v2_proj_ng) \
-                           + self.contrastive_loss(v2_pred, v1_proj_k, self.queue_v1_proj_ng)
+            v_queue_loss = self.contrastive_loss(v1_pred, v2_proj_k, self.queue_v2_self_ng) \
+                           + self.contrastive_loss(v2_pred, v1_proj_k, self.queue_v1_self_ng)
 
             # cross modality: queue loss
-            v1_tag_queue_loss = self.contrastive_loss(v1_proj, tag_proj_k, self.queue_tag_proj_ng) \
-                                + self.contrastive_loss(tag_proj, v1_proj_k, self.queue_v1_proj_ng)
-            v1_title_queue_loss = self.contrastive_loss(v1_proj, title_proj_k, self.queue_title_proj_ng) \
-                                  + self.contrastive_loss(title_proj, v1_proj_k, self.queue_v1_proj_ng)
-            v2_tag_queue_loss = self.contrastive_loss(v2_proj, tag_proj_k, self.queue_tag_proj_ng) \
-                                + self.contrastive_loss(tag_proj, v2_proj_k, self.queue_v2_proj_ng)
-            v2_title_queue_loss = self.contrastive_loss(v2_proj, title_proj_k, self.queue_title_proj_ng) \
-                                  + self.contrastive_loss(title_proj, v2_proj_k, self.queue_v2_proj_ng)
+            v1_tag_queue_loss = self.contrastive_loss(v1_cross, tag_cross_k, self.queue_tag_cross_ng) \
+                                + self.contrastive_loss(tag_cross, v1_cross_k, self.queue_v1_cross_ng)
+            v1_title_queue_loss = self.contrastive_loss(v1_cross, title_cross_k, self.queue_title_cross_ng) \
+                                  + self.contrastive_loss(title_cross, v1_cross_k, self.queue_v1_cross_ng)
+            v2_tag_queue_loss = self.contrastive_loss(v2_cross, tag_cross_k, self.queue_tag_cross_ng) \
+                                + self.contrastive_loss(tag_cross, v2_cross_k, self.queue_v2_cross_ng)
+            v2_title_queue_loss = self.contrastive_loss(v2_cross, title_cross_k, self.queue_title_cross_ng) \
+                                  + self.contrastive_loss(title_cross, v2_cross_k, self.queue_v2_cross_ng)
             cross_queue_loss = (v1_tag_queue_loss + v1_title_queue_loss + v2_tag_queue_loss + v2_title_queue_loss) / 4
 
             # dequeue_and_enqueue
-            self._dequeue_and_enqueue(v1_proj_k, v2_proj_k, tag_proj_k, title_proj_k)
+            self._dequeue_and_enqueue(v1_proj_k, v2_proj_k, v1_cross_k, v2_cross_k, tag_cross_k, title_cross_k)
 
             # for MLM loss
             mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
@@ -412,7 +432,9 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             loss += v_queue_loss + cross_queue_loss + mlm_loss
             if self.rank == 0:
                 logger.info("loss:{},v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}".format(loss,
-                                                                            v_queue_loss, cross_queue_loss, mlm_loss))
+                                                                                             v_queue_loss,
+                                                                                             cross_queue_loss,
+                                                                                             mlm_loss))
                 if self.task_config.logdir:
                     loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss),
                                  "cross_queue_loss": float(cross_queue_loss), "mlm_loss": float(mlm_loss)}
@@ -428,7 +450,8 @@ class BirdModel(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.0101)], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
+                                              requires_grad=True)
         ################## chinese text Encoder
         # pretrained = 'voidful/albert_chinese_base'
         pretrained = 'hfl/chinese-roberta-wwm-ext'
@@ -486,7 +509,8 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.0101)], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
+                                              requires_grad=True)
         ################## chinese text Encoder
         # pretrained = 'voidful/albert_chinese_base'
         pretrained = 'hfl/chinese-roberta-wwm-ext'
