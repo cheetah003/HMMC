@@ -98,10 +98,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.contrast_temperature = task_config.contrast_temperature
         self.contrast_num_negative = task_config.contrast_num_negative
         ################## chinese text Encoder
-        # pretrained = 'voidful/albert_chinese_base'
-        pretrained = 'hfl/chinese-roberta-wwm-ext'
-        # pretrained = 'hfl/chinese-roberta-wwm-ext-large'
-        # pretrained = "nghuyong/ernie-1.0"
+        pretrained = self.task_config.pretrained_text
         self.tokenizer = BertTokenizer.from_pretrained(pretrained)
         if self.rank == 0:
             logger.info("tokenizer:pad:{},cls:{},mask:{}".format(self.tokenizer.pad_token_id,
@@ -453,10 +450,7 @@ class BirdModel(BirdPreTrainedModel):
         self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
                                               requires_grad=True)
         ################## chinese text Encoder
-        # pretrained = 'voidful/albert_chinese_base'
-        pretrained = 'hfl/chinese-roberta-wwm-ext'
-        # pretrained = 'hfl/chinese-roberta-wwm-ext-large'
-        # pretrained = "nghuyong/ernie-1.0"
+        pretrained = self.task_config.pretrained_text
         t_config = AutoConfig.from_pretrained(pretrained)
         if self.rank == 0:
             logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
@@ -512,10 +506,7 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
                                               requires_grad=True)
         ################## chinese text Encoder
-        # pretrained = 'voidful/albert_chinese_base'
-        pretrained = 'hfl/chinese-roberta-wwm-ext'
-        # pretrained = 'hfl/chinese-roberta-wwm-ext-large'
-        # pretrained = "nghuyong/ernie-1.0"
+        pretrained = self.task_config.pretrained_text
         t_config = AutoConfig.from_pretrained(pretrained)
         if self.rank == 0:
             logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))

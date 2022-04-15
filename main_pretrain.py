@@ -19,7 +19,7 @@ from tensorboardX import SummaryWriter
 from modules.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from modules.modeling import BirdModel_VT, BirdPreTrainedModel
 from modules.optimization import BertAdam
-from modules.until_module import get_dual_matrix
+from modules.until_module import get_dual_matrix, Pretrain_text_path
 from torch.utils.data import DataLoader
 from util import parallel_apply, get_logger
 from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val
@@ -60,6 +60,8 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--contrast_temperature', type=float, default=0.07, help='temperature')
     parser.add_argument('--cross_MLP', type=str, default="NO_MLP", choices=["NO_MLP", "V_MLP", "T_MLP", "VT_MLP"],
                         help='whether use MLP in cross modality')
+    parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english", "bilingual"],
+                        help='language for text encoder')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -207,7 +209,7 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
 def dataloader_bird_pretrain(args, tokenizer):
     bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/videoinfo_lmdb',
-                                          videoinfo_path='/ai/swxdisk/data/bird/videoinfo_with_time.json',
+                                          language=args.language,
                                           tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
     dataloader = DataLoader(
@@ -224,7 +226,7 @@ def dataloader_bird_pretrain(args, tokenizer):
 
 def dataloader_bird_test(args, tokenizer):
     bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',
-                                     jsonpath_query='/ai/swxdisk/data/bird/query_data_val.json',
+                                     language=args.language,
                                      tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames,
                                      task=args.task)
     dataloader = DataLoader(
@@ -471,13 +473,11 @@ def main():
     args = set_seed_logger(args)
     device, n_gpu = init_device(args, args.local_rank)
 
-    # 使用albert的tokenizer
-    # pretrained = 'voidful/albert_chinese_base'
-    pretrained = 'hfl/chinese-roberta-wwm-ext'
-    # pretrained = 'hfl/chinese-roberta-wwm-ext-large'
-    # pretrained = "nghuyong/ernie-1.0"
-    logger.info("tokenizer:{}".format(pretrained))
-    tokenizer = BertTokenizer.from_pretrained(pretrained)
+    # get text pretrained path
+    pretrained_text = Pretrain_text_path[args.language]
+    logger.info("tokenizer:{}".format(pretrained_text))
+    tokenizer = BertTokenizer.from_pretrained(pretrained_text)
+    args.pretrained_text = pretrained_text
 
     model = init_model(args, device, n_gpu, args.local_rank)
 

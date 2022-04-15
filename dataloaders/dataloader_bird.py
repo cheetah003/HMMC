@@ -22,8 +22,24 @@ logger = logging.getLogger(__name__)
 #global, number of frames in lmdb per video
 g_lmdb_frames = 48
 max_dynamic_pretrain_frames = 12
-max_dynamic_train_frames = 16
-max_dynamic_val_frames = 16
+max_dynamic_train_frames = 18
+max_dynamic_val_frames = 30
+
+_pretrain_info_path = {
+    "chinese": "/ai/swxdisk/data/bird/videoinfo_chinese.json",
+    "english": "/ai/swxdisk/data/bird/videoinfo_english.json",
+    "bilingual": "/ai/swxdisk/data/bird/videoinfo_bilingual.json"
+}
+_train_info_path = {
+    "chinese": "/ai/swxdisk/data/bird/query_data_train_chinese.json",
+    "english": "/ai/swxdisk/data/bird/query_data_train_english.json",
+    "bilingual": "/ai/swxdisk/data/bird/query_data_train_bilingual.json"
+}
+_val_info_path = {
+    "chinese": "/ai/swxdisk/data/bird/query_data_val_chinese.json",
+    "english": "/ai/swxdisk/data/bird/query_data_val_english.json",
+    "bilingual": "/ai/swxdisk/data/bird/query_data_val_bilingual.json"
+}
 
 
 class GaussianBlur(object):
@@ -72,7 +88,7 @@ def get_flat_query_list(query_list):
 
 """load: video title tag asr"""
 class dataload_bird_pretrain(VisionDataset):
-    def __init__(self, root: str, videoinfo_path:str, maxTxns: int = 1, tokenizer=None,
+    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
                  resolution=224, max_words=32, max_frames=12, transform: Optional[Callable] = None,
                  is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
         super().__init__(root, transform=transform)
@@ -93,7 +109,7 @@ class dataload_bird_pretrain(VisionDataset):
         # with open(os.path.join(root, "metadata.json"), "r") as fp:
         #     metadata = json.load(fp)
         # self._length = metadata["length"]
-        self.datalist = read_json_line(videoinfo_path)
+        self.datalist = read_json_line(_pretrain_info_path[language])
         # self.datalist = self.datalist[:256]
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
@@ -203,7 +219,7 @@ class dataload_bird_pretrain(VisionDataset):
         item = self.datalist[index]
         if self.max_frames == -1:
             # dynamic frame
-            max_frames = min(max(item["duration"] // 4, 2), max_dynamic_pretrain_frames)
+            max_frames = min(max(item["duration"] // 5, 3), max_dynamic_pretrain_frames)
         else:
             max_frames = self.max_frames
         video_key = "Video" + item['docid']
@@ -222,7 +238,7 @@ class dataload_bird_pretrain(VisionDataset):
 
 
 class dataload_bird_train(VisionDataset):
-    def __init__(self, root: str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
+    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
                  resolution=224, max_words=32, max_frames=24, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
@@ -234,11 +250,10 @@ class dataload_bird_train(VisionDataset):
         self.max_frames = max_frames
         self.task = task
         if tokenizer is None:
-            self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext-large')
+            self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext')
         else:
             self.tokenizer = tokenizer
-
-        querylist = read_json_line(jsonpath_query)
+        querylist = read_json_line(_train_info_path[language])
         self.datalist = get_flat_query_list(querylist)
         # self.datalist = self.datalist[:2048]
         self._length = len(self.datalist)
@@ -264,7 +279,7 @@ class dataload_bird_train(VisionDataset):
             self._env.close()
 
     def _initEnv(self):
-        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 500, subdir=True, readonly=True, readahead=False,
+        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 80, subdir=True, readonly=True, readahead=False,
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
@@ -353,7 +368,7 @@ class dataload_bird_train(VisionDataset):
         item = self.datalist[index]
         if self.max_frames == -1:
             # dynamic frame
-            max_frames = min(max(item["duration"] // 2, 3), max_dynamic_train_frames)
+            max_frames = min(max(int(item["duration"] * 0.3), 3), max_dynamic_train_frames)
         else:
             max_frames = self.max_frames
         # query, pos_item = self._get_pos_pair(item)
@@ -374,7 +389,7 @@ class dataload_bird_train(VisionDataset):
 
 
 class dataload_bird_val(VisionDataset):
-    def __init__(self, root: str, jsonpath_query:str, maxTxns: int = 1, tokenizer=None,
+    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
                  resolution=224, max_words=32, max_frames=24, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
@@ -386,11 +401,11 @@ class dataload_bird_val(VisionDataset):
         self.max_frames = max_frames
         self.task = task
         if tokenizer is None:
-            self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext-large')
+            self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext')
         else:
             self.tokenizer = tokenizer
 
-        self.datalist = read_json_line(jsonpath_query)
+        self.datalist = read_json_line(_val_info_path[language])
         # self.datalist = self.datalist[:256]
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
@@ -411,7 +426,7 @@ class dataload_bird_val(VisionDataset):
             self._env.close()
 
     def _initEnv(self):
-        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 500, subdir=True, readonly=True, readahead=False,
+        self._env = lmdb.open(self.root, map_size=1024 * 1024 * 1024 * 80, subdir=True, readonly=True, readahead=False,
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
