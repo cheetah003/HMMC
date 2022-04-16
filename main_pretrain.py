@@ -122,8 +122,9 @@ def set_seed_logger(args):
         os.makedirs(args.output_dir, exist_ok=True)
 
     logger = get_logger(os.path.join(args.output_dir, "log.txt"))
-    args.writer = SummaryWriter('runs/pretrain/exp1', comment='coatten')
     if args.local_rank == 0:
+        if args.logdir:
+            args.writer = SummaryWriter(args.logdir)
         logger.info("Effective parameters:")
         for key in sorted(args.__dict__):
             logger.info("  <<< {}: {}".format(key, args.__dict__[key]))
