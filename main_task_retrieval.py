@@ -219,9 +219,8 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
 def dataloader_bird_train(args, tokenizer):
     bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb',
-                                        language=args.language,
-                                        tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames,
-                                        task=args.task)
+                                        language=args.language, tokenizer=tokenizer,
+                                        max_frames=args.max_frames, task=args.task)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
     dataloader = DataLoader(
         bird_trainset,
@@ -237,9 +236,8 @@ def dataloader_bird_train(args, tokenizer):
 
 def dataloader_bird_test(args, tokenizer):
     bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',
-                                     language=args.language,
-                                     tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames,
-                                     task=args.task)
+                                     language=args.language, tokenizer=tokenizer,
+                                     max_frames=args.max_frames, task=args.task)
     dataloader = DataLoader(
         bird_testset,
         batch_size=args.batch_size_val,
@@ -379,6 +377,7 @@ def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
 
 
 def eval_epoch(args, model, test_dataloader, device, n_gpu):
+    torch.cuda.empty_cache()
     if hasattr(model, 'module'):
         model = model.module.to(device)
     else:

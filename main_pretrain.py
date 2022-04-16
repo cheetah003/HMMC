@@ -55,7 +55,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--seed', type=int, default=42, help='random seed')
     parser.add_argument('--max_words', type=int, default=32, help='')
     parser.add_argument('--max_frames', type=int, default=12, help='')
-    parser.add_argument('--contrast_num_negative', type=int, default=65536, help='Num of negative sample in queue')
+    parser.add_argument('--contrast_num_negative', type=int, default=16384, help='Num of negative sample in queue')
     parser.add_argument('--contrast_momentum', type=float, default=0.999, help='momentum')
     parser.add_argument('--contrast_temperature', type=float, default=0.07, help='temperature')
     parser.add_argument('--cross_MLP', type=str, default="NO_MLP", choices=["NO_MLP", "V_MLP", "T_MLP", "VT_MLP"],
@@ -210,7 +210,7 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 def dataloader_bird_pretrain(args, tokenizer):
     bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/videoinfo_lmdb',
                                           language=args.language,
-                                          tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames)
+                                          tokenizer=tokenizer, max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
     dataloader = DataLoader(
         bird_dataset,
@@ -226,9 +226,8 @@ def dataloader_bird_pretrain(args, tokenizer):
 
 def dataloader_bird_test(args, tokenizer):
     bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',
-                                     language=args.language,
-                                     tokenizer=tokenizer, max_words=args.max_words, max_frames=args.max_frames,
-                                     task=args.task)
+                                     language=args.language, tokenizer=tokenizer,
+                                     max_frames=args.max_frames, task=args.task)
     dataloader = DataLoader(
         bird_testset,
         batch_size=args.batch_size_val,
@@ -359,6 +358,7 @@ def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list)
 
 
 def eval_epoch(args, model, test_dataloader, device, n_gpu):
+    torch.cuda.empty_cache()
     if hasattr(model, 'module'):
         model = model.module.to(device)
     else:
@@ -521,7 +521,6 @@ def main():
                     metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
                     if args.logdir:
                         args.writer.add_scalars('metrics', {'R1': metrics["R1"]}, global_step=epoch)
-            torch.cuda.empty_cache()
 
     elif args.do_params:
         logger.info("do_params begin!")

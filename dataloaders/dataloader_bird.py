@@ -21,9 +21,12 @@ logger = logging.getLogger(__name__)
 
 #global, number of frames in lmdb per video
 g_lmdb_frames = 48
-max_dynamic_pretrain_frames = 12
+max_dynamic_pretrain_frames = 18
 max_dynamic_train_frames = 18
 max_dynamic_val_frames = 30
+title_max_words = 45
+tag_max_words = 25
+query_max_words = 15
 
 _pretrain_info_path = {
     "chinese": "/ai/swxdisk/data/bird/videoinfo_chinese.json",
@@ -86,10 +89,9 @@ def get_flat_query_list(query_list):
     return flat_query_list
 
 
-"""load: video title tag asr"""
 class dataload_bird_pretrain(VisionDataset):
     def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_words=32, max_frames=12, transform: Optional[Callable] = None,
+                 resolution=224, max_frames=12, transform: Optional[Callable] = None,
                  is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
         super().__init__(root, transform=transform)
         self._maxTxns = maxTxns
@@ -97,8 +99,9 @@ class dataload_bird_pretrain(VisionDataset):
         self._env = None
         self._txn = None
         self.resolution = resolution
-        self.max_words = max_words
         self.max_frames = max_frames
+        self.title_max_words = title_max_words
+        self.tag_max_words = tag_max_words
         if tokenizer is None:
             self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext')
         else:
@@ -110,7 +113,7 @@ class dataload_bird_pretrain(VisionDataset):
         #     metadata = json.load(fp)
         # self._length = metadata["length"]
         self.datalist = read_json_line(_pretrain_info_path[language])
-        # self.datalist = self.datalist[:256]
+        # self.datalist = self.datalist[:10240]
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
@@ -137,10 +140,10 @@ class dataload_bird_pretrain(VisionDataset):
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
-    def _get_text(self, caption=None):
+    def _get_text(self, caption, max_words):
         words = self.tokenizer.tokenize(caption)
         words = [self.SPECIAL_TOKEN["CLS_TOKEN"]] + words
-        total_length_with_CLS = self.max_words - 1
+        total_length_with_CLS = max_words - 1
         if len(words) > total_length_with_CLS:
             words = words[:total_length_with_CLS]
         words = words + [self.SPECIAL_TOKEN["SEP_TOKEN"]]
@@ -148,13 +151,13 @@ class dataload_bird_pretrain(VisionDataset):
 
         input_mask = [1] * len(input_ids)
         segment_ids = [0] * len(input_ids)
-        while len(input_ids) < self.max_words:
+        while len(input_ids) < max_words:
             input_ids.append(0)
             input_mask.append(0)
             segment_ids.append(0)
-        assert len(input_ids) == self.max_words
-        assert len(input_mask) == self.max_words
-        assert len(segment_ids) == self.max_words
+        assert len(input_ids) == max_words
+        assert len(input_mask) == max_words
+        assert len(segment_ids) == max_words
 
         pairs_text = np.array(input_ids)
         pairs_mask = np.array(input_mask)
@@ -219,7 +222,7 @@ class dataload_bird_pretrain(VisionDataset):
         item = self.datalist[index]
         if self.max_frames == -1:
             # dynamic frame
-            max_frames = min(max(item["duration"] // 5, 3), max_dynamic_pretrain_frames)
+            max_frames = min(max(int(item["duration"] * 0.3), 3), max_dynamic_pretrain_frames)
         else:
             max_frames = self.max_frames
         video_key = "Video" + item['docid']
@@ -229,8 +232,8 @@ class dataload_bird_pretrain(VisionDataset):
         title_text = item['title']
         # print("title[{}]:{}".format(index,title_text))
         # print("video[{}]:{}".format(index, item['video_id']))
-        tag_ids, tag_mask, _ = self._get_text(tag_text)
-        title_ids, title_mask, _ = self._get_text(title_text)
+        tag_ids, tag_mask, _ = self._get_text(tag_text, self.tag_max_words)
+        title_ids, title_mask, _ = self._get_text(title_text, self.title_max_words)
         return video_data1, video_data2, max_frames, tag_ids, tag_mask, title_ids, title_mask
 
     def __len__(self) -> int:
@@ -239,15 +242,16 @@ class dataload_bird_pretrain(VisionDataset):
 
 class dataload_bird_train(VisionDataset):
     def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_words=32, max_frames=24, task="retrieval_VT") -> None:
+                 resolution=224, max_frames=24, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
         self._txn = None
         self.resolution = resolution
-        self.max_words = max_words
         self.max_frames = max_frames
+        self.query_max_words = query_max_words
+        self.title_max_words = title_max_words
         self.task = task
         if tokenizer is None:
             self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext')
@@ -283,10 +287,10 @@ class dataload_bird_train(VisionDataset):
                               meminit=False, max_spare_txns=self._maxTxns, lock=False)
         self._txn = self._env.begin(write=False, buffers=True)
 
-    def _get_text(self, caption=None):
+    def _get_text(self, caption, max_words):
         words = self.tokenizer.tokenize(caption)
         words = [self.SPECIAL_TOKEN["CLS_TOKEN"]] + words
-        total_length_with_CLS = self.max_words - 1
+        total_length_with_CLS = max_words - 1
         if len(words) > total_length_with_CLS:
             words = words[:total_length_with_CLS]
         words = words + [self.SPECIAL_TOKEN["SEP_TOKEN"]]
@@ -294,13 +298,13 @@ class dataload_bird_train(VisionDataset):
 
         input_mask = [1] * len(input_ids)
         segment_ids = [0] * len(input_ids)
-        while len(input_ids) < self.max_words:
+        while len(input_ids) < max_words:
             input_ids.append(0)
             input_mask.append(0)
             segment_ids.append(0)
-        assert len(input_ids) == self.max_words
-        assert len(input_mask) == self.max_words
-        assert len(segment_ids) == self.max_words
+        assert len(input_ids) == max_words
+        assert len(input_mask) == max_words
+        assert len(segment_ids) == max_words
 
         pairs_text = np.array(input_ids)
         pairs_mask = np.array(input_mask)
@@ -368,18 +372,18 @@ class dataload_bird_train(VisionDataset):
         item = self.datalist[index]
         if self.max_frames == -1:
             # dynamic frame
-            max_frames = min(max(int(item["duration"] * 0.3), 3), max_dynamic_train_frames)
+            max_frames = min(max(int(item["duration"] * 0.5), 3), max_dynamic_train_frames)
         else:
             max_frames = self.max_frames
         # query, pos_item = self._get_pos_pair(item)
         query = item['query']
         videoid = "Video" + item['docid']
         video_data = self._get_video(videoid, max_frames)
-        query_ids, query_mask, _ = self._get_text(query)
+        query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
 
         if self.task == "retrieval_VT":
             title = item['title']
-            title_ids, title_mask, _ = self._get_text(title)
+            title_ids, title_mask, _ = self._get_text(title, self.title_max_words)
             return query_ids, query_mask, video_data, max_frames, title_ids, title_mask, index
         else:
             return query_ids, query_mask, video_data, max_frames, index
@@ -390,15 +394,16 @@ class dataload_bird_train(VisionDataset):
 
 class dataload_bird_val(VisionDataset):
     def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_words=32, max_frames=24, task="retrieval_VT") -> None:
+                 resolution=224, max_frames=24, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
         self._txn = None
         self.resolution = resolution
-        self.max_words = max_words
         self.max_frames = max_frames
+        self.query_max_words = query_max_words
+        self.title_max_words = title_max_words
         self.task = task
         if tokenizer is None:
             self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext')
@@ -436,10 +441,10 @@ class dataload_bird_val(VisionDataset):
         pos_item = poslist[0]
         return query, pos_item
 
-    def _get_text(self, caption=None):
+    def _get_text(self, caption, max_words):
         words = self.tokenizer.tokenize(caption)
         words = [self.SPECIAL_TOKEN["CLS_TOKEN"]] + words
-        total_length_with_CLS = self.max_words - 1
+        total_length_with_CLS = max_words - 1
         if len(words) > total_length_with_CLS:
             words = words[:total_length_with_CLS]
         words = words + [self.SPECIAL_TOKEN["SEP_TOKEN"]]
@@ -447,13 +452,13 @@ class dataload_bird_val(VisionDataset):
 
         input_mask = [1] * len(input_ids)
         segment_ids = [0] * len(input_ids)
-        while len(input_ids) < self.max_words:
+        while len(input_ids) < max_words:
             input_ids.append(0)
             input_mask.append(0)
             segment_ids.append(0)
-        assert len(input_ids) == self.max_words
-        assert len(input_mask) == self.max_words
-        assert len(segment_ids) == self.max_words
+        assert len(input_ids) == max_words
+        assert len(input_mask) == max_words
+        assert len(segment_ids) == max_words
 
         pairs_text = np.array(input_ids)
         pairs_mask = np.array(input_mask)
@@ -508,18 +513,18 @@ class dataload_bird_val(VisionDataset):
         videoid = "Video" + pos_item["docid"]
         if self.max_frames == -1:
             # dynamic frame
-            max_frames = min(max(pos_item["duration"] // 2, 3), max_dynamic_val_frames)
+            max_frames = min(max(int(pos_item["duration"] * 0.5), 3), max_dynamic_val_frames)
         else:
             max_frames = self.max_frames
         video_data = self._get_video(videoid, max_frames)
         # query = "关于 " + query + " 的视频"
         # print("[{}]query:{},title:{},video:{}".format(index, query, pos_title, videoid))
         # print("video[{}]:{}".format(index, item['video_id']))
-        query_ids, query_mask, _ = self._get_text(query)
+        query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
 
         if self.task == "retrieval_VT":
             title = pos_item['title']
-            title_ids, title_mask, _ = self._get_text(title)
+            title_ids, title_mask, _ = self._get_text(title, self.title_max_words)
             return query_ids, query_mask, video_data, max_frames, title_ids, title_mask
         else:
             return query_ids, query_mask, video_data, max_frames

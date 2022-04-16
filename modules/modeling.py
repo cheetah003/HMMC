@@ -359,7 +359,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         video2 = torch.as_tensor(video_data2)
 
         if self.rank == 0:
-            logger.info("video1.shape:{}, dtype:{}".format(video1.shape, video1.dtype))
+            logger.info("video1.shape:{}, dtype:{}, device:{}".format(video1.shape, video1.dtype, video1.device))
+            logger.info("title_ids.shape:{}, dtype:{}, device:{}".format(title_ids.shape, title_ids.dtype, title_ids.device))
 
         if self.training:
             loss = 0.0
@@ -400,7 +401,9 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             # compute loss
             if self.rank == 0:
                 logger.info(
-                    "dtype: v1_fea:{},tag_fea:{},title_fea:{}".format(v1_fea.dtype, tag_fea.dtype, title_fea.dtype))
+                    "dtype: v1_fea:{},v1_fea_k:{},title_fea:{}".format(v1_fea.dtype, v1_fea_k.dtype, title_fea.dtype))
+                logger.info(
+                    "device: v1_fea:{},v1_fea_k:{},title_fea:{}".format(v1_fea.device, v1_fea_k.device, title_fea.device))
             # single modality: video queue loss
             v_queue_loss = self.contrastive_loss(v1_pred, v2_proj_k, self.queue_v2_self_ng) \
                            + self.contrastive_loss(v2_pred, v1_proj_k, self.queue_v1_self_ng)
