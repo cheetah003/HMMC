@@ -278,8 +278,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     load_start_time = time.time()
     for step, batch in enumerate(train_dataloader):
         load_finish_time = time.time()
-        if args.local_rank == 0:
-            logger.info("data loader time:{}".format(load_finish_time - load_start_time))
+        # if args.local_rank == 0:
+        logger.info("[{}]data loader time:{}".format(args.local_rank, load_finish_time - load_start_time))
         global_step += 1
         if n_gpu == 1:
             # multi-gpu does scattering it-self
@@ -300,8 +300,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             loss.backward()
         total_loss += float(loss)
         forward_and_backward_time = time.time()
-        if args.local_rank == 0:
-            logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
+        # if args.local_rank == 0:
+        logger.info("[{}]forward_and_backward_time :{}".format(args.local_rank, forward_and_backward_time - load_finish_time))
         if (step + 1) % args.gradient_accumulation_steps == 0:
             if args.fp16_opt_level != "O0":
                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)

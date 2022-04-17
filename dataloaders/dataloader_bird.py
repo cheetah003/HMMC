@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 #global, number of frames in lmdb per video
 g_lmdb_frames = 48
 max_dynamic_pretrain_frames = 18
-max_dynamic_train_frames = 18
+max_dynamic_train_frames = 12
 max_dynamic_val_frames = 30
 title_max_words = 45
 tag_max_words = 25
@@ -318,17 +318,17 @@ class dataload_bird_train(VisionDataset):
         # global writer
         # random sample start ##################################################
         # assert g_lmdb_frames % self.max_frames == 0
-        # video_index = np.arange(0, g_lmdb_frames)
-        # # print("video_index:{}".format(video_index))
-        # sample_slice = list()
-        # k = g_lmdb_frames // self.max_frames
-        # for i in np.arange(self.max_frames):
-        #     index = random.choice(video_index[k * i:k * (i + 1)])
-        #     sample_slice.append(index)
-        # sample
         video_index = np.arange(0, g_lmdb_frames)
-        sample_slice = random.sample(list(video_index), max_frames)
-        sample_slice = sorted(sample_slice)
+        # print("video_index:{}".format(video_index))
+        sample_slice = list()
+        k = g_lmdb_frames // max_frames
+        for i in np.arange(max_frames):
+            index = random.choice(video_index[k * i:k * (i + 1)])
+            sample_slice.append(index)
+        # sample
+        # video_index = np.arange(0, g_lmdb_frames)
+        # sample_slice = random.sample(list(video_index), max_frames)
+        # sample_slice = sorted(sample_slice)
         # random sample end ##################################################
         for step, i in enumerate(sample_slice):
             video_key_new = video_key + "_%d" % i
