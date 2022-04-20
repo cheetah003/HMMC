@@ -61,7 +61,6 @@ class CLIP4ClipPreTrainedModel(PreTrainedModel, nn.Module):
 
         model = cls(cross_config, *inputs, **kwargs)
 
-        # <=== End of initialization trick
         if state_dict is not None:
             model = cls.init_preweight(model, state_dict, task_config=task_config)
 
@@ -92,7 +91,10 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.mlm_probability = 0.15
-        self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+        # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+        self.weight_v = cross_config.weight_sum_v
+        self.weight_t = cross_config.weight_sum_t
+        self.weight_cross = cross_config.weight_sum_cross
         self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
         self.contrast_momentum = task_config.contrast_momentum
         self.contrast_temperature = task_config.contrast_temperature
@@ -117,10 +119,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         # for MLM
         self.cls = BertLMPredictionHead(t_config, None)
         ################## visual_encoder
-        clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/32")
-        clip = build_model(clip_state_dict, local_rank=self.rank)
-        self.visual_encoder = VisualEncoder(clip, cross_config)
-        self.visual_encoder_k = VisualEncoder(clip, cross_config)
+        self.visual_encoder = VisualEncoder(self.rank, cross_config)
+        self.visual_encoder_k = VisualEncoder(self.rank, cross_config)
         self.v_projector = MLP(num_layers=cross_config.proj_num_layers)
         self.v_projector_k = MLP(num_layers=cross_config.proj_num_layers)
         self.v_predictor = MLP(num_layers=cross_config.pred_num_layers)
@@ -362,7 +362,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             logger.info("video1.shape:{}, dtype:{}, device:{}".format(video1.shape, video1.dtype, video1.device))
 
         if self.training:
-            loss = 0.0
+            # loss = 0.0
             v1_fea = self.visual_encoder(video1, video_frame)
             v2_fea = self.visual_encoder(video2, video_frame)
             tag_fea = self.get_sequence_output(tag_ids, tag_mask)
@@ -426,7 +426,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
             # total loss
             # loss += inbatch_loss + v_queue_loss + cross_queue_loss + mlm_loss
-            loss += v_queue_loss + cross_queue_loss + mlm_loss
+            loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * mlm_loss
             if self.rank == 0:
                 logger.info("loss:{},v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}".format(loss,
                                                                                              v_queue_loss,
@@ -456,10 +456,7 @@ class BirdModel(BirdPreTrainedModel):
             logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
         self.text_encoder = AutoModel.from_pretrained(pretrained)
         ################## visual_encoder
-        clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/32")
-        clip = build_model(clip_state_dict, local_rank=self.rank)
-        # logger.info("clip.logit_scale:{}".format(clip.logit_scale.exp()))
-        self.visual_encoder = VisualEncoder(clip, cross_config)
+        self.visual_encoder = VisualEncoder(self.rank, cross_config)
         ################## loss function
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
@@ -512,9 +509,7 @@ class BirdModel_VT(BirdPreTrainedModel):
             logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
         self.text_encoder = AutoModel.from_pretrained(pretrained)
         ################## visual_encoder
-        clip_state_dict = CLIP.get_config(pretrained_clip_name="ViT-B/32")
-        clip = build_model(clip_state_dict, local_rank=self.rank)
-        self.visual_encoder = VisualEncoder(clip, cross_config)
+        self.visual_encoder = VisualEncoder(self.rank, cross_config)
 
         ################## loss function
         self.loss_fct = CrossEn()

@@ -61,6 +61,10 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--seed', type=int, default=42, help='random seed')
     parser.add_argument('--max_words', type=int, default=32, help='')
     parser.add_argument('--max_frames', type=int, default=12, help='')
+    parser.add_argument('--frame_sample', type=str, default="uniform", choices=["uniform", "random", "uniform_random"],
+                        help='frame sample strategy')
+    parser.add_argument('--frame_sample_len', type=str, default="dynamic", choices=["dynamic", "fix"],
+                        help='use dynamic frame length of fix frame length')
     parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english", "bilingual"],
                         help='language for text encoder')
 
@@ -182,15 +186,15 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
     decay_param_tp = [(n, p) for n, p in param_optimizer if not any(nd in n for nd in no_decay)]
     no_decay_param_tp = [(n, p) for n, p in param_optimizer if any(nd in n for nd in no_decay)]
 
-    decay_clip_param_tp = [(n, p) for n, p in decay_param_tp if "visual_encoder.visual" in n]
+    decay_clip_param_tp = [(n, p) for n, p in decay_param_tp if "visual_encoder.visual." in n]
     decay_chinesebert_param_tp = [(n, p) for n, p in decay_param_tp if "text_encoder." in n]
     decay_noclip_param_tp = [(n, p) for n, p in decay_param_tp if
-                             ("visual_encoder.visual" not in n) and ("text_encoder." not in n)]
+                             ("visual_encoder.visual." not in n) and ("text_encoder." not in n)]
 
-    no_decay_clip_param_tp = [(n, p) for n, p in no_decay_param_tp if "visual_encoder.visual" in n]
+    no_decay_clip_param_tp = [(n, p) for n, p in no_decay_param_tp if "visual_encoder.visual." in n]
     no_decay_chinesebert_param_tp = [(n, p) for n, p in no_decay_param_tp if "text_encoder." in n]
     no_decay_noclip_param_tp = [(n, p) for n, p in no_decay_param_tp if
-                                ("visual_encoder.visual" not in n) and ("text_encoder." not in n)]
+                                ("visual_encoder.visual." not in n) and ("text_encoder." not in n)]
 
     weight_decay = 0.2
     optimizer_grouped_parameters = [
@@ -207,20 +211,21 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                          schedule='warmup_cosine', b1=0.9, b2=0.98, e=1e-6,
                          t_total=num_train_optimization_steps, weight_decay=weight_decay,
                          max_grad_norm=1.0)
-
     if args.fp16_opt_level != "O0":
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
-
+    # if args.local_rank == 0:
+    #     for name, parameters in model.named_parameters():
+    #         print("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
     return optimizer, scheduler, model
 
 
 def dataloader_bird_train(args, tokenizer):
-    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb',
-                                        language=args.language, tokenizer=tokenizer,
-                                        max_frames=args.max_frames, task=args.task)
+    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
+                                        tokenizer=tokenizer,max_frames=args.max_frames, frame_sample=args.frame_sample,
+                                        frame_sample_len=args.frame_sample_len, task=args.task)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
     dataloader = DataLoader(
         bird_trainset,
@@ -236,8 +241,8 @@ def dataloader_bird_train(args, tokenizer):
 
 def dataloader_bird_test(args, tokenizer):
     bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',
-                                     language=args.language, tokenizer=tokenizer,
-                                     max_frames=args.max_frames, task=args.task)
+                                     language=args.language, tokenizer=tokenizer, max_frames=args.max_frames,
+                                     frame_sample_len=args.frame_sample_len, task=args.task)
     dataloader = DataLoader(
         bird_testset,
         batch_size=args.batch_size_val,
@@ -564,7 +569,8 @@ def main():
                     # if epoch == 100:
                     metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
                     if args.logdir:
-                        args.writer.add_scalars('metrics', {'R1': metrics["R1"]}, global_step=epoch)
+                        args.writer.add_scalars('metrics', {'R1': metrics["R1"], 'R5': metrics["R5"],
+                                                            'R10': metrics["R10"]}, global_step=epoch)
         if args.local_rank == 0:
             save_model(epoch, args, model, type_name="")
     elif args.do_eval:

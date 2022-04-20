@@ -417,7 +417,7 @@ class CLIP(nn.Module):
 
     @staticmethod
     def get_config(pretrained_clip_name="ViT-B/32"):
-        logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
+        # logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
         model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ViT-B-32.pt")
         if pretrained_clip_name == "ViT-B/32" and os.path.exists(model_path):
             pass

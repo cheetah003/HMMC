@@ -21,9 +21,6 @@ logger = logging.getLogger(__name__)
 
 #global, number of frames in lmdb per video
 g_lmdb_frames = 48
-max_dynamic_pretrain_frames = 18
-max_dynamic_train_frames = 12
-max_dynamic_val_frames = 30
 title_max_words = 45
 tag_max_words = 25
 query_max_words = 15
@@ -91,15 +88,16 @@ def get_flat_query_list(query_list):
 
 class dataload_bird_pretrain(VisionDataset):
     def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_frames=12, transform: Optional[Callable] = None,
-                 is_valid_file: Optional[Callable[[str], bool]] = None) -> None:
-        super().__init__(root, transform=transform)
+                 resolution=224, max_frames=12, frame_sample=None, frame_sample_len=None) -> None:
+        super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
         self._txn = None
         self.resolution = resolution
         self.max_frames = max_frames
+        self.frame_sample = frame_sample
+        self.frame_sample_len = frame_sample_len
         self.title_max_words = title_max_words
         self.tag_max_words = tag_max_words
         if tokenizer is None:
@@ -113,7 +111,10 @@ class dataload_bird_pretrain(VisionDataset):
         #     metadata = json.load(fp)
         # self._length = metadata["length"]
         self.datalist = read_json_line(_pretrain_info_path[language])
+
+        # for fast debug
         # self.datalist = self.datalist[:10240]
+
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
@@ -165,16 +166,31 @@ class dataload_bird_pretrain(VisionDataset):
 
         return pairs_text, pairs_mask, pairs_segment
 
-    def _get_video(self, video_key, max_frames):
+    def _get_video(self, video_key, frames):
         video_list = list()
         global g_lmdb_frames
         # global writer
         # random sample start ##################################################
-        video_index = np.arange(0, g_lmdb_frames)
-        sample_slice = random.sample(list(video_index), max_frames * 2)
-        sample_slice1 = sorted(sample_slice[0:max_frames])
-        sample_slice2 = sorted(sample_slice[max_frames:2 * max_frames])
-        sample_slice = sample_slice1 + sample_slice2
+        if self.frame_sample == "uniform_random":
+            # assert g_lmdb_frames % frames == 0
+            video_index = list(np.arange(0, g_lmdb_frames))
+            # print("video_index:{}".format(video_index))
+            sample_slice1 = list()
+            sample_slice2 = list()
+            k = g_lmdb_frames // frames
+            for i in np.arange(frames):
+                index = random.sample(video_index[k * i:k * (i + 1)], 2)
+                sample_slice1.append(index[0])
+                sample_slice2.append(index[1])
+            sample_slice = sample_slice1 + sample_slice2
+        elif self.frame_sample == "random":
+            video_index = np.arange(0, g_lmdb_frames)
+            sample_slice = random.sample(list(video_index), frames * 2)
+            sample_slice1 = sorted(sample_slice[0:frames])
+            sample_slice2 = sorted(sample_slice[frames:2 * frames])
+            sample_slice = sample_slice1 + sample_slice2
+        else:
+            sample_slice = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
         # random sample end ##################################################
         for step, i in enumerate(sample_slice):
             video_key_new = video_key + "_%d" % i
@@ -196,13 +212,13 @@ class dataload_bird_pretrain(VisionDataset):
         # print("video data.shape:{}".format(video_data.shape))
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([2*max_frames, 3, self.resolution, self.resolution])
-        video_data1 = video_data[:max_frames, :, :, :]
-        video_data2 = video_data[max_frames:2*max_frames, :, :, :]
-        if self.max_frames == -1:
+        video_data = video_data.reshape([2*frames, 3, self.resolution, self.resolution])
+        video_data1 = video_data[:frames, :, :, :]
+        video_data2 = video_data[frames:2*frames, :, :, :]
+        if self.frame_sample_len == "dynamic":
             # dynamic frame needs pad
-            if max_frames < max_dynamic_pretrain_frames:
-                pad = np.zeros([max_dynamic_pretrain_frames - max_frames, 3, self.resolution, self.resolution],
+            if frames < self.max_frames:
+                pad = np.zeros([self.max_frames - frames, 3, self.resolution, self.resolution],
                                dtype=np.float32)
                 video_data1 = np.concatenate((video_data1, pad), axis=0)
                 video_data2 = np.concatenate((video_data2, pad), axis=0)
@@ -220,13 +236,14 @@ class dataload_bird_pretrain(VisionDataset):
         if self._env is None:
             self._initEnv()
         item = self.datalist[index]
-        if self.max_frames == -1:
+        if self.frame_sample_len == "dynamic":
             # dynamic frame
-            max_frames = min(max(int(item["duration"] * 0.3), 3), max_dynamic_pretrain_frames)
+            frames = min(max(int(item["duration"] * 0.3), 3), self.max_frames)
         else:
-            max_frames = self.max_frames
+            # fix frame
+            frames = self.max_frames
         video_key = "Video" + item['docid']
-        video_data1, video_data2 = self._get_video(video_key, max_frames)
+        video_data1, video_data2 = self._get_video(video_key, frames)
 
         tag_text = item['tag']
         title_text = item['title']
@@ -234,15 +251,15 @@ class dataload_bird_pretrain(VisionDataset):
         # print("video[{}]:{}".format(index, item['video_id']))
         tag_ids, tag_mask, _ = self._get_text(tag_text, self.tag_max_words)
         title_ids, title_mask, _ = self._get_text(title_text, self.title_max_words)
-        return video_data1, video_data2, max_frames, tag_ids, tag_mask, title_ids, title_mask
+        return video_data1, video_data2, frames, tag_ids, tag_mask, title_ids, title_mask
 
     def __len__(self) -> int:
         return self._length
 
 
 class dataload_bird_train(VisionDataset):
-    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_frames=24, task="retrieval_VT") -> None:
+    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,resolution=224, max_frames=24,
+                 frame_sample=None, frame_sample_len=None, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
@@ -250,6 +267,8 @@ class dataload_bird_train(VisionDataset):
         self._txn = None
         self.resolution = resolution
         self.max_frames = max_frames
+        self.frame_sample = frame_sample
+        self.frame_sample_len = frame_sample_len
         self.query_max_words = query_max_words
         self.title_max_words = title_max_words
         self.task = task
@@ -259,7 +278,9 @@ class dataload_bird_train(VisionDataset):
             self.tokenizer = tokenizer
         querylist = read_json_line(_train_info_path[language])
         self.datalist = get_flat_query_list(querylist)
-        # self.datalist = self.datalist[:2048]
+        # for fast debug
+        # self.datalist = self.datalist[0:50000:10]
+
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
@@ -312,24 +333,28 @@ class dataload_bird_train(VisionDataset):
 
         return pairs_text, pairs_mask, pairs_segment
 
-    def _get_video(self, video_key, max_frames):
+    def _get_video(self, video_key, frames):
         video_list = list()
         global g_lmdb_frames
         # global writer
         # random sample start ##################################################
-        # assert g_lmdb_frames % self.max_frames == 0
-        video_index = np.arange(0, g_lmdb_frames)
-        # print("video_index:{}".format(video_index))
-        sample_slice = list()
-        k = g_lmdb_frames // max_frames
-        for i in np.arange(max_frames):
-            index = random.choice(video_index[k * i:k * (i + 1)])
-            sample_slice.append(index)
-        # sample
-        # video_index = np.arange(0, g_lmdb_frames)
-        # sample_slice = random.sample(list(video_index), max_frames)
-        # sample_slice = sorted(sample_slice)
-        # random sample end ##################################################
+        if self.frame_sample == "uniform_random":
+            # assert g_lmdb_frames % frames == 0
+            video_index = list(np.arange(0, g_lmdb_frames))
+            # print("video_index:{}".format(video_index))
+            sample_slice = list()
+            k = g_lmdb_frames // frames
+            for i in np.arange(frames):
+                index = random.sample(video_index[k * i:k * (i + 1)], 1)
+                sample_slice.append(index[0])
+        elif self.frame_sample == "random":
+            # sample
+            video_index = list(np.arange(0, g_lmdb_frames))
+            sample_slice = random.sample(video_index, frames)
+            sample_slice = sorted(sample_slice)
+        else:
+            sample_slice = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
+            # random sample end ##################################################
         for step, i in enumerate(sample_slice):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
@@ -349,11 +374,11 @@ class dataload_bird_train(VisionDataset):
         video_data = np.stack(video_list)
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([max_frames, 3, self.resolution, self.resolution])
-        if self.max_frames == -1:
+        video_data = video_data.reshape([frames, 3, self.resolution, self.resolution])
+        if self.frame_sample_len == "dynamic":
             # dynamic frame needs pad
-            if max_frames < max_dynamic_train_frames:
-                pad = np.zeros([max_dynamic_train_frames - max_frames, 3, self.resolution, self.resolution],
+            if frames < self.max_frames:
+                pad = np.zeros([self.max_frames - frames, 3, self.resolution, self.resolution],
                                dtype=np.float32)
                 video_data = np.concatenate((video_data, pad), axis=0)
 
@@ -370,23 +395,23 @@ class dataload_bird_train(VisionDataset):
         if self._env is None:
             self._initEnv()
         item = self.datalist[index]
-        if self.max_frames == -1:
+        if self.frame_sample_len == "dynamic":
             # dynamic frame
-            max_frames = min(max(int(item["duration"] * 0.5), 3), max_dynamic_train_frames)
+            frames = min(max(int(item["duration"] * 0.5), 3), self.max_frames)
         else:
-            max_frames = self.max_frames
+            frames = self.max_frames
         # query, pos_item = self._get_pos_pair(item)
         query = item['query']
         videoid = "Video" + item['docid']
-        video_data = self._get_video(videoid, max_frames)
+        video_data = self._get_video(videoid, frames)
         query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
 
         if self.task == "retrieval_VT":
             title = item['title']
             title_ids, title_mask, _ = self._get_text(title, self.title_max_words)
-            return query_ids, query_mask, video_data, max_frames, title_ids, title_mask, index
+            return query_ids, query_mask, video_data, frames, title_ids, title_mask, index
         else:
-            return query_ids, query_mask, video_data, max_frames, index
+            return query_ids, query_mask, video_data, frames, index
 
     def __len__(self) -> int:
         return self._length
@@ -394,7 +419,7 @@ class dataload_bird_train(VisionDataset):
 
 class dataload_bird_val(VisionDataset):
     def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
-                 resolution=224, max_frames=24, task="retrieval_VT") -> None:
+                 resolution=224, max_frames=24, frame_sample_len=None, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
@@ -402,6 +427,7 @@ class dataload_bird_val(VisionDataset):
         self._txn = None
         self.resolution = resolution
         self.max_frames = max_frames
+        self.frame_sample_len = frame_sample_len
         self.query_max_words = query_max_words
         self.title_max_words = title_max_words
         self.task = task
@@ -411,7 +437,9 @@ class dataload_bird_val(VisionDataset):
             self.tokenizer = tokenizer
 
         self.datalist = read_json_line(_val_info_path[language])
+        # for fast debug
         # self.datalist = self.datalist[:256]
+
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
@@ -466,13 +494,13 @@ class dataload_bird_val(VisionDataset):
 
         return pairs_text, pairs_mask, pairs_segment
 
-    def _get_video(self, video_key, max_frames):
+    def _get_video(self, video_key, frames):
         video_list = list()
         global g_lmdb_frames
         #uniform sample start ##################################################
         # assert g_lmdb_frames % self.max_frames == 0
         # video_index = np.arange(0, g_lmdb_frames, g_lmdb_frames // self.max_frames)
-        video_index = np.linspace(0, g_lmdb_frames, max_frames, endpoint=False, dtype=int)
+        video_index = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
         #uniform sample end ##################################################
         for i in video_index:
             video_key_new = video_key + "_%d" % i
@@ -488,11 +516,11 @@ class dataload_bird_val(VisionDataset):
             video_list.append(frame_data)
         video_data = np.stack(video_list)
         video_data = video_data.copy()
-        video_data = video_data.reshape([max_frames, 3, self.resolution, self.resolution])
-        if self.max_frames == -1:
+        video_data = video_data.reshape([frames, 3, self.resolution, self.resolution])
+        if self.frame_sample_len == "dynamic":
             # dynamic frame needs pad
-            if max_frames < max_dynamic_val_frames:
-                pad = np.zeros([max_dynamic_val_frames - max_frames, 3, self.resolution, self.resolution],
+            if frames < self.max_frames:
+                pad = np.zeros([self.max_frames - frames, 3, self.resolution, self.resolution],
                                dtype=np.float32)
                 video_data = np.concatenate((video_data, pad), axis=0)
 
@@ -511,12 +539,12 @@ class dataload_bird_val(VisionDataset):
         item = self.datalist[index]
         query, pos_item = self._get_pos_pair(item)
         videoid = "Video" + pos_item["docid"]
-        if self.max_frames == -1:
+        if self.frame_sample_len == "dynamic":
             # dynamic frame
-            max_frames = min(max(int(pos_item["duration"] * 0.5), 3), max_dynamic_val_frames)
+            frames = min(max(int(pos_item["duration"] * 0.5), 3), self.max_frames)
         else:
-            max_frames = self.max_frames
-        video_data = self._get_video(videoid, max_frames)
+            frames = self.max_frames
+        video_data = self._get_video(videoid, frames)
         # query = "关于 " + query + " 的视频"
         # print("[{}]query:{},title:{},video:{}".format(index, query, pos_title, videoid))
         # print("video[{}]:{}".format(index, item['video_id']))
@@ -525,9 +553,9 @@ class dataload_bird_val(VisionDataset):
         if self.task == "retrieval_VT":
             title = pos_item['title']
             title_ids, title_mask, _ = self._get_text(title, self.title_max_words)
-            return query_ids, query_mask, video_data, max_frames, title_ids, title_mask
+            return query_ids, query_mask, video_data, frames, title_ids, title_mask
         else:
-            return query_ids, query_mask, video_data, max_frames
+            return query_ids, query_mask, video_data, frames
 
     def __len__(self) -> int:
         return self._length

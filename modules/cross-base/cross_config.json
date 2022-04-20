@@ -6,5 +6,8 @@
   "temporal_hidden_layers": 4,
   "co_attention_layers": 4,
   "proj_num_layers": 2,
-  "pred_num_layers": 2
+  "pred_num_layers": 2,
+  "weight_sum_v": 0.2,
+  "weight_sum_t": 0.2,
+  "weight_sum_cross": 0.6
 }

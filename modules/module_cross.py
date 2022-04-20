@@ -134,8 +134,13 @@ class Transformer(nn.Module):
 
 
 class VisualEncoder(nn.Module):
-    def __init__(self, clip, cross_config):
+    def __init__(self, local_rank, cross_config):
         super().__init__()
+        pretrained_clip_name = "ViT-B/32"
+        if local_rank == 0:
+            logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
+        clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
+        clip = build_model(clip_state_dict, local_rank=local_rank)
         self.is_vit = clip.vit
         self.visual = clip.visual
         self.temporal_transformer = Transformer(width=cross_config.temporal_hidden_size,
