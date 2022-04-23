@@ -90,7 +90,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         super(BirdPreTrainedModel, self).__init__(cross_config)
         self.task_config = task_config
         self.rank = task_config.local_rank
-        self.mlm_probability = 0.15
+        self.mlm_probability = cross_config.mlm_probability
         # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
         self.weight_v = cross_config.weight_sum_v
         self.weight_t = cross_config.weight_sum_t
@@ -428,10 +428,10 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             # loss += inbatch_loss + v_queue_loss + cross_queue_loss + mlm_loss
             loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * mlm_loss
             if self.rank == 0:
-                logger.info("loss:{},v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}".format(loss,
-                                                                                             v_queue_loss,
-                                                                                             cross_queue_loss,
-                                                                                             mlm_loss))
+                logger.info("v1_tag_queue_loss:{},v1_title_queue_loss:{},v2_tag_queue_loss:{},v2_title_queue_loss:{}"
+                            "".format(v1_tag_queue_loss, v1_title_queue_loss, v2_tag_queue_loss, v2_title_queue_loss))
+                logger.info("loss:{},v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}"
+                            "".format(loss, v_queue_loss, cross_queue_loss, mlm_loss))
                 if self.task_config.logdir:
                     loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss),
                                  "cross_queue_loss": float(cross_queue_loss), "mlm_loss": float(mlm_loss)}

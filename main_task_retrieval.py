@@ -52,7 +52,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="choose dataset.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
-    parser.add_argument('--chinese_lr', type=float, default=0.00001, help='chinese learning rate')
+    parser.add_argument('--text_lr', type=float, default=0.00001, help='text encoder learning rate')
     parser.add_argument('--epochs', type=int, default=20, help='upper epoch limit')
     parser.add_argument('--batch_size', type=int, default=256, help='batch size')
     parser.add_argument('--batch_size_val', type=int, default=3500, help='batch size eval')
@@ -67,6 +67,10 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help='use dynamic frame length of fix frame length')
     parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english", "bilingual"],
                         help='language for text encoder')
+    parser.add_argument('--train_path', type=str, default="/ai/swxdisk/data/bird/query_data_train_bilingual.json",
+                        help='train data path')
+    parser.add_argument('--val_path', type=str, default="/ai/swxdisk/data/bird/query_data_val_bilingual.json",
+                        help='val data path')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -192,17 +196,17 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                              ("visual_encoder.visual." not in n) and ("text_encoder." not in n)]
 
     no_decay_clip_param_tp = [(n, p) for n, p in no_decay_param_tp if "visual_encoder.visual." in n]
-    no_decay_chinesebert_param_tp = [(n, p) for n, p in no_decay_param_tp if "text_encoder." in n]
+    no_decay_text_param_tp = [(n, p) for n, p in no_decay_param_tp if "text_encoder." in n]
     no_decay_noclip_param_tp = [(n, p) for n, p in no_decay_param_tp if
                                 ("visual_encoder.visual." not in n) and ("text_encoder." not in n)]
 
     weight_decay = 0.2
     optimizer_grouped_parameters = [
         {'params': [p for n, p in decay_clip_param_tp], 'weight_decay': weight_decay, 'lr': args.lr * coef_lr},
-        {'params': [p for n, p in decay_chinesebert_param_tp], 'weight_decay': weight_decay, 'lr': args.chinese_lr},
+        {'params': [p for n, p in decay_chinesebert_param_tp], 'weight_decay': weight_decay, 'lr': args.text_lr},
         {'params': [p for n, p in decay_noclip_param_tp], 'weight_decay': weight_decay},
         {'params': [p for n, p in no_decay_clip_param_tp], 'weight_decay': 0.0, 'lr': args.lr * coef_lr},
-        {'params': [p for n, p in no_decay_chinesebert_param_tp], 'weight_decay': 0.0, 'lr': args.chinese_lr},
+        {'params': [p for n, p in no_decay_text_param_tp], 'weight_decay': 0.0, 'lr': args.text_lr},
         {'params': [p for n, p in no_decay_noclip_param_tp], 'weight_decay': 0.0}
     ]
 
@@ -216,16 +220,17 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
-    # if args.local_rank == 0:
-    #     for name, parameters in model.named_parameters():
-    #         print("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
+    if args.local_rank == 0:
+        for name, parameters in model.named_parameters():
+            print("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
     return optimizer, scheduler, model
 
 
 def dataloader_bird_train(args, tokenizer):
     bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
-                                        tokenizer=tokenizer,max_frames=args.max_frames, frame_sample=args.frame_sample,
-                                        frame_sample_len=args.frame_sample_len, task=args.task)
+                                        json_path=args.train_path, tokenizer=tokenizer, max_frames=args.max_frames,
+                                        frame_sample=args.frame_sample, frame_sample_len=args.frame_sample_len,
+                                        task=args.task)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
     dataloader = DataLoader(
         bird_trainset,
@@ -240,8 +245,8 @@ def dataloader_bird_train(args, tokenizer):
 
 
 def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',
-                                     language=args.language, tokenizer=tokenizer, max_frames=args.max_frames,
+    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
+                                     json_path=args.val_path, tokenizer=tokenizer, max_frames=args.max_frames,
                                      frame_sample_len=args.frame_sample_len, task=args.task)
     dataloader = DataLoader(
         bird_testset,
@@ -389,6 +394,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         model = model.to(device)
 
     model.eval()
+    logger.info("args.task:{}".format(args.task))
     with torch.no_grad():
         batch_query_output_list, batch_visual_output_list = [], []
         batch_title_output_list = []

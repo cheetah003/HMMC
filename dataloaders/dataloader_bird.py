@@ -19,27 +19,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-#global, number of frames in lmdb per video
+# global, number of frames in lmdb per video
 g_lmdb_frames = 48
 title_max_words = 45
 tag_max_words = 25
 query_max_words = 15
-
-_pretrain_info_path = {
-    "chinese": "/ai/swxdisk/data/bird/videoinfo_chinese.json",
-    "english": "/ai/swxdisk/data/bird/videoinfo_english.json",
-    "bilingual": "/ai/swxdisk/data/bird/videoinfo_bilingual.json"
-}
-_train_info_path = {
-    "chinese": "/ai/swxdisk/data/bird/query_data_train_chinese.json",
-    "english": "/ai/swxdisk/data/bird/query_data_train_english.json",
-    "bilingual": "/ai/swxdisk/data/bird/query_data_train_bilingual.json"
-}
-_val_info_path = {
-    "chinese": "/ai/swxdisk/data/bird/query_data_val_chinese.json",
-    "english": "/ai/swxdisk/data/bird/query_data_val_english.json",
-    "bilingual": "/ai/swxdisk/data/bird/query_data_val_bilingual.json"
-}
 
 
 class GaussianBlur(object):
@@ -74,12 +58,15 @@ def get_flat_query_list(query_list):
     flat_query_list = list()
     for itm in query_list:
         query = itm['query']
+        query_eng = itm["query_eng"]
         poslist = itm['videolist']
         for positem in poslist:
             item = dict()
             item["query"] = query
+            item["query_eng"] = query_eng
             item["docid"] = positem["docid"]
             item["title"] = positem["title"]
+            item["title_eng"] = positem["title_eng"]
             item["duration"] = positem["duration"]
             flat_query_list.append(item)
 
@@ -87,13 +74,14 @@ def get_flat_query_list(query_list):
 
 
 class dataload_bird_pretrain(VisionDataset):
-    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
+    def __init__(self, root: str, language: str, json_path: str, maxTxns: int = 1, tokenizer=None,
                  resolution=224, max_frames=12, frame_sample=None, frame_sample_len=None) -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
         self._txn = None
+        self.language = language
         self.resolution = resolution
         self.max_frames = max_frames
         self.frame_sample = frame_sample
@@ -110,7 +98,7 @@ class dataload_bird_pretrain(VisionDataset):
         # with open(os.path.join(root, "metadata.json"), "r") as fp:
         #     metadata = json.load(fp)
         # self._length = metadata["length"]
-        self.datalist = read_json_line(_pretrain_info_path[language])
+        self.datalist = read_json_line(json_path)
 
         # for fast debug
         # self.datalist = self.datalist[:10240]
@@ -127,6 +115,7 @@ class dataload_bird_pretrain(VisionDataset):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
+
     def __enter__(self):
         return self
 
@@ -212,9 +201,9 @@ class dataload_bird_pretrain(VisionDataset):
         # print("video data.shape:{}".format(video_data.shape))
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([2*frames, 3, self.resolution, self.resolution])
+        video_data = video_data.reshape([2 * frames, 3, self.resolution, self.resolution])
         video_data1 = video_data[:frames, :, :, :]
-        video_data2 = video_data[frames:2*frames, :, :, :]
+        video_data2 = video_data[frames:2 * frames, :, :, :]
         if self.frame_sample_len == "dynamic":
             # dynamic frame needs pad
             if frames < self.max_frames:
@@ -244,27 +233,33 @@ class dataload_bird_pretrain(VisionDataset):
             frames = self.max_frames
         video_key = "Video" + item['docid']
         video_data1, video_data2 = self._get_video(video_key, frames)
-
-        tag_text = item['tag']
-        title_text = item['title']
-        # print("title[{}]:{}".format(index,title_text))
-        # print("video[{}]:{}".format(index, item['video_id']))
+        if self.language == "chinese":
+            tag_text = item['tag']
+            title_text = item['title']
+        elif self.language == "english":
+            tag_text = item['tag_eng']
+            title_text = item['title_eng']
+        else:
+            raise NotImplementedError("bilingual:not implemented!")
+        # print("[{}] video_key:{}; title:{}; tag:{}".format(index, video_key, title_text, tag_text))
         tag_ids, tag_mask, _ = self._get_text(tag_text, self.tag_max_words)
         title_ids, title_mask, _ = self._get_text(title_text, self.title_max_words)
-        return video_data1, video_data2, frames, tag_ids, tag_mask, title_ids, title_mask
 
+        return video_data1, video_data2, frames, tag_ids, tag_mask, title_ids, title_mask
     def __len__(self) -> int:
         return self._length
 
 
 class dataload_bird_train(VisionDataset):
-    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,resolution=224, max_frames=24,
+    def __init__(self, root: str, language: str, json_path: str, maxTxns: int = 1, tokenizer=None, resolution=224,
+                 max_frames=24,
                  frame_sample=None, frame_sample_len=None, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
         self._txn = None
+        self.language = language
         self.resolution = resolution
         self.max_frames = max_frames
         self.frame_sample = frame_sample
@@ -276,7 +271,7 @@ class dataload_bird_train(VisionDataset):
             self.tokenizer = BertTokenizer.from_pretrained('hfl/chinese-roberta-wwm-ext')
         else:
             self.tokenizer = tokenizer
-        querylist = read_json_line(_train_info_path[language])
+        querylist = read_json_line(json_path)
         self.datalist = get_flat_query_list(querylist)
         # for fast debug
         # self.datalist = self.datalist[0:50000:10]
@@ -400,14 +395,19 @@ class dataload_bird_train(VisionDataset):
             frames = min(max(int(item["duration"] * 0.5), 3), self.max_frames)
         else:
             frames = self.max_frames
-        # query, pos_item = self._get_pos_pair(item)
-        query = item['query']
         videoid = "Video" + item['docid']
         video_data = self._get_video(videoid, frames)
-        query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
-
-        if self.task == "retrieval_VT":
+        if self.language == "chinese":
+            query = item['query']
             title = item['title']
+        elif self.language == "english":
+            query = item['query_eng']
+            title = item['title_eng']
+        else:
+            raise NotImplementedError("bilingual:not implemented!")
+
+        query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
+        if self.task == "retrieval_VT":
             title_ids, title_mask, _ = self._get_text(title, self.title_max_words)
             return query_ids, query_mask, video_data, frames, title_ids, title_mask, index
         else:
@@ -418,13 +418,14 @@ class dataload_bird_train(VisionDataset):
 
 
 class dataload_bird_val(VisionDataset):
-    def __init__(self, root: str, language:str, maxTxns: int = 1, tokenizer=None,
+    def __init__(self, root: str, language: str, json_path: str, maxTxns: int = 1, tokenizer=None,
                  resolution=224, max_frames=24, frame_sample_len=None, task="retrieval_VT") -> None:
         super().__init__(root)
         self._maxTxns = maxTxns
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
         self._txn = None
+        self.language = language
         self.resolution = resolution
         self.max_frames = max_frames
         self.frame_sample_len = frame_sample_len
@@ -436,9 +437,9 @@ class dataload_bird_val(VisionDataset):
         else:
             self.tokenizer = tokenizer
 
-        self.datalist = read_json_line(_val_info_path[language])
+        self.datalist = read_json_line(json_path)
         # for fast debug
-        # self.datalist = self.datalist[:256]
+        # self.datalist = self.datalist[:32]
 
         self._length = len(self.datalist)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
@@ -464,7 +465,12 @@ class dataload_bird_val(VisionDataset):
         self._txn = self._env.begin(write=False, buffers=True)
 
     def _get_pos_pair(self, item=None):
-        query = item['query']
+        if self.language == "chinese":
+            query = item['query']
+        elif self.language == "english":
+            query = item['query_eng']
+        else:
+            raise NotImplementedError("bilingual:not implemented!")
         poslist = item['videolist']
         pos_item = poslist[0]
         return query, pos_item
@@ -497,11 +503,11 @@ class dataload_bird_val(VisionDataset):
     def _get_video(self, video_key, frames):
         video_list = list()
         global g_lmdb_frames
-        #uniform sample start ##################################################
+        # uniform sample start ##################################################
         # assert g_lmdb_frames % self.max_frames == 0
         # video_index = np.arange(0, g_lmdb_frames, g_lmdb_frames // self.max_frames)
         video_index = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
-        #uniform sample end ##################################################
+        # uniform sample end ##################################################
         for i in video_index:
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
@@ -546,12 +552,15 @@ class dataload_bird_val(VisionDataset):
             frames = self.max_frames
         video_data = self._get_video(videoid, frames)
         # query = "关于 " + query + " 的视频"
-        # print("[{}]query:{},title:{},video:{}".format(index, query, pos_title, videoid))
+        # print("[{}]query:{},video:{}".format(index, query, videoid))
         # print("video[{}]:{}".format(index, item['video_id']))
         query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
 
         if self.task == "retrieval_VT":
-            title = pos_item['title']
+            if self.language == "chinese":
+                title = pos_item['title']
+            elif self.language == "english":
+                title = pos_item['title_eng']
             title_ids, title_mask, _ = self._get_text(title, self.title_max_words)
             return query_ids, query_mask, video_data, frames, title_ids, title_mask
         else:

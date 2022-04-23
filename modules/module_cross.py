@@ -137,12 +137,15 @@ class VisualEncoder(nn.Module):
     def __init__(self, local_rank, cross_config):
         super().__init__()
         pretrained_clip_name = "ViT-B/32"
+        # pretrained_clip_name = "ViT-B/16"
+        # pretrained_clip_name = "RN101"
+
         if local_rank == 0:
             logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
         clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
         clip = build_model(clip_state_dict, local_rank=local_rank)
-        self.is_vit = clip.vit
-        self.visual = clip.visual
+        self.is_vit = copy.deepcopy(clip.vit)
+        self.visual = copy.deepcopy(clip.visual)
         self.temporal_transformer = Transformer(width=cross_config.temporal_hidden_size,
                                           layers=cross_config.temporal_hidden_layers,
                                           heads=cross_config.temporal_attention_heads)

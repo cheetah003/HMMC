@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 Pretrain_text_path = {
     "chinese": "hfl/chinese-roberta-wwm-ext",
-    "english": "roberta-base",
+    "english": "/root/.cache/huggingface/bert-base-uncased",
     "bilingual": "bert-base-multilingual-uncased"
 }
 

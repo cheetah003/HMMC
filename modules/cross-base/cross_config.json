@@ -4,6 +4,7 @@
   "temporal_hidden_size": 512,
   "temporal_attention_heads": 8,
   "temporal_hidden_layers": 4,
+  "mlm_probability": 0.15,
   "co_attention_layers": 4,
   "proj_num_layers": 2,
   "pred_num_layers": 2,

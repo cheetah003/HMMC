@@ -45,7 +45,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="choose downstream task.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
-    parser.add_argument('--chinese_lr', type=float, default=0.00001, help='chinese learning rate')
+    parser.add_argument('--text_lr', type=float, default=0.00001, help='text encoder learning rate')
     parser.add_argument('--epochs', type=int, default=20, help='upper epoch limit')
     parser.add_argument('--batch_size', type=int, default=256, help='batch size')
     parser.add_argument('--batch_queue_factor', type=int, default=5, help='queue size =batch size * batch_queue_factor')
@@ -59,13 +59,17 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help='frame sample strategy')
     parser.add_argument('--frame_sample_len', type=str, default="dynamic", choices=["dynamic", "fix"],
                         help='use dynamic frame length of fix frame length')
-    parser.add_argument('--contrast_num_negative', type=int, default=65536, help='Num of negative sample in queue')
-    parser.add_argument('--contrast_momentum', type=float, default=0.999, help='momentum')
+    parser.add_argument('--contrast_num_negative', type=int, default=8192, help='Num of negative sample in queue')
+    parser.add_argument('--contrast_momentum', type=float, default=0.99, help='momentum')
     parser.add_argument('--contrast_temperature', type=float, default=0.07, help='temperature')
     parser.add_argument('--cross_MLP', type=str, default="NO_MLP", choices=["NO_MLP", "V_MLP", "T_MLP", "VT_MLP"],
                         help='whether use MLP in cross modality')
     parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english", "bilingual"],
                         help='language for text encoder')
+    parser.add_argument('--pretrain_path', type=str, default="/ai/swxdisk/data/bird/videoinfo_bilingual.json",
+                        help='pretrain data path')
+    parser.add_argument('--val_path', type=str, default="/ai/swxdisk/data/bird/query_data_val_bilingual.json",
+                        help='val data path')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -185,17 +189,17 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                              ("visual_encoder.visual." not in n) and ("text_encoder." not in n)]
 
     no_decay_clip_param_tp = [(n, p) for n, p in no_decay_param_tp if "visual_encoder.visual." in n]
-    no_decay_chinesebert_param_tp = [(n, p) for n, p in no_decay_param_tp if "text_encoder." in n]
+    no_decay_text_param_tp = [(n, p) for n, p in no_decay_param_tp if "text_encoder." in n]
     no_decay_noclip_param_tp = [(n, p) for n, p in no_decay_param_tp if
                                 ("visual_encoder.visual." not in n) and ("text_encoder." not in n)]
 
     weight_decay = 0.2
     optimizer_grouped_parameters = [
         {'params': [p for n, p in decay_clip_param_tp], 'weight_decay': weight_decay, 'lr': args.lr * coef_lr},
-        {'params': [p for n, p in decay_chinesebert_param_tp], 'weight_decay': weight_decay, 'lr': args.chinese_lr},
+        {'params': [p for n, p in decay_chinesebert_param_tp], 'weight_decay': weight_decay, 'lr': args.text_lr},
         {'params': [p for n, p in decay_noclip_param_tp], 'weight_decay': weight_decay},
         {'params': [p for n, p in no_decay_clip_param_tp], 'weight_decay': 0.0, 'lr': args.lr * coef_lr},
-        {'params': [p for n, p in no_decay_chinesebert_param_tp], 'weight_decay': 0.0, 'lr': args.chinese_lr},
+        {'params': [p for n, p in no_decay_text_param_tp], 'weight_decay': 0.0, 'lr': args.text_lr},
         {'params': [p for n, p in no_decay_noclip_param_tp], 'weight_decay': 0.0}
     ]
 
@@ -209,15 +213,15 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
-    # if args.local_rank == 0:
-    #     for name, parameters in model.named_parameters():
-    #         logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
+    if args.local_rank == 0:
+        for name, parameters in model.named_parameters():
+            logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
     return optimizer, scheduler, model
 
 
 def dataloader_bird_pretrain(args, tokenizer):
-    bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/videoinfo_lmdb',
-                                          language=args.language, tokenizer=tokenizer, max_frames=args.max_frames,
+    bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/videoinfo_lmdb', language=args.language,
+                                          json_path=args.pretrain_path, tokenizer=tokenizer, max_frames=args.max_frames,
                                           frame_sample=args.frame_sample, frame_sample_len=args.frame_sample_len)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
     dataloader = DataLoader(
@@ -233,8 +237,8 @@ def dataloader_bird_pretrain(args, tokenizer):
 
 
 def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',
-                                     language=args.language, tokenizer=tokenizer, max_frames=args.max_frames,
+    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
+                                     json_path=args.val_path, tokenizer=tokenizer, max_frames=args.max_frames,
                                      frame_sample_len=args.frame_sample_len, task=args.task)
     dataloader = DataLoader(
         bird_testset,
@@ -285,8 +289,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     load_start_time = time.time()
     for step, batch in enumerate(train_dataloader):
         load_finish_time = time.time()
-        # if args.local_rank == 0:
-        logger.info("[{}]data loader time:{}".format(args.local_rank, load_finish_time - load_start_time))
+        if args.local_rank == 0:
+            logger.info("[{}]data loader time:{}".format(args.local_rank, load_finish_time - load_start_time))
         global_step += 1
         if n_gpu == 1:
             # multi-gpu does scattering it-self
@@ -307,8 +311,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             loss.backward()
         total_loss += float(loss)
         forward_and_backward_time = time.time()
-        # if args.local_rank == 0:
-        logger.info("[{}]forward_and_backward_time :{}".format(args.local_rank, forward_and_backward_time - load_finish_time))
+        if args.local_rank == 0:
+            logger.info("[{}]forward_and_backward_time :{}".format(args.local_rank, forward_and_backward_time - load_finish_time))
         if (step + 1) % args.gradient_accumulation_steps == 0:
             if args.fp16_opt_level != "O0":
                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
@@ -340,29 +344,27 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     return total_loss, global_step
 
 
-def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list):
+def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list, batch_title_output_list):
     sim_matrix = []
-    # logger.info("batch_sequence_output_list:{}".format(batch_sequence_output_list))
-    # logger.info("batch_visual_output_list:{}".format(batch_visual_output_list))
-    # logger.info("batch_ocr_output_list:{}".format(batch_ocr_output_list))
-    # logger.info("batch_title_output_list:{}".format(batch_title_output_list))
+    sim_matrix_title = []
     for idx1, query_output in enumerate(batch_query_output_list):
         each_row = []
-        for idx2, visual_output in enumerate(batch_visual_output_list):
-            # print("visual shape:{},type:{}".format(visual_output.shape,type(visual_output)))
-            # print("ocr_output shape:{},type:{}".format(ocr_output.shape,type(ocr_output)))
-            # co_visual_output = co_visual_output.view(co_visual_output.size(0), video_frame, -1, co_visual_output.size(-1))
-            # co_visual_output = co_visual_output[:, :, 0, :]
+        title_each_row = []
+        for idx2, (visual_output, title_output) in enumerate(zip(batch_visual_output_list, batch_title_output_list)):
             b1b2_logits = model.loose_similarity(query_output, visual_output)
-
+            title_logits = model.loose_similarity(query_output, title_output)
             b1b2_logits = b1b2_logits.cpu().detach().numpy()
+            title_logits = title_logits.cpu().detach().numpy()
             each_row.append(b1b2_logits)
+            title_each_row.append(title_logits)
 
         each_row = np.concatenate(tuple(each_row), axis=-1)
+        title_each_row = np.concatenate(tuple(title_each_row), axis=-1)
         # sim_matrix.append(preprocessing.scale(each_row, axis=1))
         sim_matrix.append(each_row)
+        sim_matrix_title.append(title_each_row)
     # logger.info("sim_matrix:{}".format(sim_matrix))
-    return sim_matrix
+    return sim_matrix, sim_matrix_title
 
 
 def eval_epoch(args, model, test_dataloader, device, n_gpu):
@@ -373,6 +375,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         model = model.to(device)
 
     model.eval()
+    logger.info("args.task:{}".format(args.task))
     with torch.no_grad():
         batch_query_output_list, batch_visual_output_list = [], []
         batch_title_output_list = []
@@ -541,7 +544,8 @@ def main():
             flops, params = profile(model, (query_ids, query_mask, pos_video_data, pos_title_ids, pos_title_mask,))
             print('flops: %.2f G, params: %.2f M' % (flops / 1e9, params / 1e6))
             break
-    args.writer.close()
+    if args.local_rank == 0 and args.logdir:
+        args.writer.close()
 
 
 if __name__ == "__main__":
