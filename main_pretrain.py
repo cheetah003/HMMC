@@ -23,6 +23,7 @@ from modules.until_module import get_dual_matrix, Pretrain_text_path
 from torch.utils.data import DataLoader
 from util import parallel_apply, get_logger
 from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val
+from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_DataLoader
 
 try:
     # noinspection PyUnresolvedReferences
@@ -43,6 +44,8 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--do_params", action='store_true', help="text the params of the model.")
     parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
+    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt"],
+                        help="choose dataset.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
     parser.add_argument('--text_lr', type=float, default=0.00001, help='text encoder learning rate')
@@ -60,7 +63,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--frame_sample_len', type=str, default="dynamic", choices=["dynamic", "fix"],
                         help='use dynamic frame length of fix frame length')
     parser.add_argument('--contrast_num_negative', type=int, default=8192, help='Num of negative sample in queue')
-    parser.add_argument('--contrast_momentum', type=float, default=0.99, help='momentum')
+    parser.add_argument('--contrast_momentum', type=float, default=0.999, help='momentum')
     parser.add_argument('--contrast_temperature', type=float, default=0.07, help='temperature')
     parser.add_argument('--cross_MLP', type=str, default="NO_MLP", choices=["NO_MLP", "V_MLP", "T_MLP", "VT_MLP"],
                         help='whether use MLP in cross modality')
@@ -248,6 +251,18 @@ def dataloader_bird_test(args, tokenizer):
         drop_last=False,
     )
     return dataloader, len(bird_testset)
+
+
+def dataloader_msrvtt_test(args, tokenizer):
+    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, max_frames=args.max_frames,)
+    dataloader = DataLoader(
+        msrvtt_testset,
+        batch_size=args.batch_size_val,
+        num_workers=args.num_thread_reader,
+        shuffle=False,
+        drop_last=False,
+    )
+    return dataloader, len(msrvtt_testset)
 
 
 def save_model(epoch, args, model, type_name=""):
@@ -491,9 +506,12 @@ def main():
     args.pretrained_text = pretrained_text
 
     model = init_model(args, device, n_gpu, args.local_rank)
-
-    test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
-
+    if args.dataset == "bird":
+        test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
+    elif args.dataset == "msrvtt":
+        test_dataloader, test_length = dataloader_msrvtt_test(args, tokenizer)
+    else:
+        raise NotImplementedError("wrong dataset")
     if args.local_rank == 0:
         logger.info("***** Running test *****")
         logger.info("  Num examples = %d", test_length)

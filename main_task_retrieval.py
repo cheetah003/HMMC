@@ -258,6 +258,32 @@ def dataloader_bird_test(args, tokenizer):
     return dataloader, len(bird_testset)
 
 
+def dataloader_msrvtt_train(args, tokenizer):
+    msrvtt_trainset = MSRVTT_TrainDataLoader(tokenizer=tokenizer, max_frames=args.max_frames)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(msrvtt_trainset)
+    dataloader = DataLoader(
+        msrvtt_trainset,
+        batch_size=args.batch_size // args.n_gpu,
+        num_workers=args.num_thread_reader,
+        pin_memory=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        drop_last=True,
+    )
+    return dataloader, len(msrvtt_trainset), train_sampler
+
+
+def dataloader_msrvtt_test(args, tokenizer):
+    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, max_frames=args.max_frames,)
+    dataloader = DataLoader(
+        msrvtt_testset,
+        batch_size=args.batch_size_val,
+        num_workers=args.num_thread_reader,
+        shuffle=False,
+        drop_last=False,
+    )
+    return dataloader, len(msrvtt_testset)
+
 def save_model(epoch, args, model, type_name=""):
     # Only save the model it-self
     model_to_save = model.module if hasattr(model, 'module') else model
@@ -533,7 +559,12 @@ def main():
                 param.requires_grad = False
     '''
 
-    test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
+    if args.dataset == "bird":
+        test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
+    elif args.dataset == "msrvtt":
+        test_dataloader, test_length = dataloader_msrvtt_test(args, tokenizer)
+    else:
+        raise NotImplementedError("wrong dataset")
 
     if args.local_rank == 0:
         logger.info("***** Running test *****")
@@ -542,7 +573,13 @@ def main():
         logger.info("  Num steps = %d", len(test_dataloader))
 
     if args.do_train:
-        train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
+        if args.dataset == "bird":
+            train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
+        elif args.dataset == "msrvtt":
+            train_dataloader, train_length, train_sampler = dataloader_msrvtt_train(args, tokenizer)
+        else:
+            raise NotImplementedError("wrong dataset")
+
         num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
                                         / args.gradient_accumulation_steps) * args.epochs
         # logger.info("train_dataloader len = {}".format(len(train_dataloader)))
