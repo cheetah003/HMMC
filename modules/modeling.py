@@ -12,10 +12,10 @@ import torch.distributed as dist
 from functools import partial
 from diffdist import functional
 from transformers import AutoConfig, AutoModel, BertTokenizer
-
+from modules.tokenization_clip import SimpleTokenizer as ClipTokenizer
 from modules.until_module import PreTrainedModel, AllGather, CrossEn, Dual_CrossEn
-from modules.module_cross import Transformer, VisualEncoder, CrossConfig
-from modules.module_vilbert import co_attention_model, BertLMPredictionHead, BertConfig
+from modules.module_cross import TextEncoder, VisualEncoder, CrossConfig, BertLMPredictionHead
+# from modules.module_vilbert import co_attention_model, BertLMPredictionHead, BertConfig
 from modules.module_clip import CLIP, convert_weights, build_model
 
 logger = logging.getLogger(__name__)
@@ -100,24 +100,26 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.contrast_temperature = task_config.contrast_temperature
         self.contrast_num_negative = task_config.contrast_num_negative
         ################## chinese text Encoder
-        pretrained = self.task_config.pretrained_text
-        self.tokenizer = BertTokenizer.from_pretrained(pretrained)
+        if self.task_config.language == "chinese":
+            self.tokenizer = BertTokenizer.from_pretrained(self.task_config.pretrained_text)
+        else:
+            self.tokenizer = ClipTokenizer()
         if self.rank == 0:
-            logger.info("tokenizer:pad:{},cls:{},mask:{}".format(self.tokenizer.pad_token_id,
-                                                                 self.tokenizer.cls_token_id,
-                                                                 self.tokenizer.mask_token_id))
-        t_config = AutoConfig.from_pretrained(pretrained)
-        self.chinese_bert_config = t_config
-        if self.rank == 0:
-            logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
-        self.text_encoder = AutoModel.from_pretrained(pretrained)
-        self.text_encoder_k = AutoModel.from_pretrained(pretrained)
+            logger.info("tokenizer:pad:{},cls:{},mask:{}, voacb_size:{}".format(self.tokenizer.pad_token_id,
+                                                                 type(self.tokenizer.cls_token_id),
+                                                                 self.tokenizer.mask_token_id,
+                                                                 self.tokenizer.vocab_size))
+        t_config = AutoConfig.from_pretrained(self.task_config.pretrained_text)
+        self.text_encoder = TextEncoder(self.task_config, cross_config)
+        self.text_encoder_k = TextEncoder(self.task_config, cross_config)
         self.t_projector = MLP(num_layers=cross_config.proj_num_layers)
         self.t_projector_k = MLP(num_layers=cross_config.proj_num_layers)
         nn.SyncBatchNorm.convert_sync_batchnorm(self.t_projector)
         nn.SyncBatchNorm.convert_sync_batchnorm(self.t_projector_k)
         # for MLM
-        self.cls = BertLMPredictionHead(t_config, None)
+        t_config.hidden_size = cross_config.temporal_hidden_size
+        t_config.vocab_size = self.tokenizer.vocab_size
+        self.cls = BertLMPredictionHead(t_config)
         ################## visual_encoder
         self.visual_encoder = VisualEncoder(self.rank, cross_config)
         self.visual_encoder_k = VisualEncoder(self.rank, cross_config)
@@ -135,12 +137,12 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                             ]
         self.copy_params()
         ################## create queue
-        self.register_buffer("queue_v1_self_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_v2_self_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_v1_cross_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_v2_cross_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_title_cross_ng", torch.randn(768, self.contrast_num_negative))
-        self.register_buffer("queue_tag_cross_ng", torch.randn(768, self.contrast_num_negative))
+        self.register_buffer("queue_v1_self_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        self.register_buffer("queue_v2_self_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        self.register_buffer("queue_v1_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        self.register_buffer("queue_v2_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        self.register_buffer("queue_title_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        self.register_buffer("queue_tag_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
         self.queue_v1_self_ng = F.normalize(self.queue_v1_self_ng, dim=0)
         self.queue_v2_self_ng = F.normalize(self.queue_v2_self_ng, dim=0)
         self.queue_v1_cross_ng = F.normalize(self.queue_v1_cross_ng, dim=0)
@@ -163,15 +165,17 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         masked_input_ids, input_labels = self.mask(to_mask_input_ids, self.tokenizer.vocab_size,
                                                    input_mask.device, targets=input_labels,
                                                    probability_matrix=input_probability_matrix)
-        masked_input_output = self.get_sequence_output(masked_input_ids, input_mask, return_hidden=True)
+        masked_input_output = self.text_encoder(masked_input_ids, input_mask, return_hidden=True)
         mlm_input_loss = self.calculate_mlm_loss(masked_input_output, input_labels)
         return mlm_input_loss
 
     def calculate_mlm_loss(self, sequence_output_mlm, labels):
+
         mlm_scores = self.cls(sequence_output_mlm)
+        # logger.info("sequence_output_mlm.shape:{}".format(sequence_output_mlm.shape))
         # logger.info("mlm_scores.shape:{}".format(mlm_scores.shape))
         # logger.info("labels.shape:{}".format(labels.shape))
-        mlm_loss = F.cross_entropy(mlm_scores.view(-1, self.chinese_bert_config.vocab_size),
+        mlm_loss = F.cross_entropy(mlm_scores.view(-1, self.tokenizer.vocab_size),
                                    labels.view(-1), ignore_index=-100)
         return mlm_loss
 
@@ -200,25 +204,6 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             return input_ids, targets
         else:
             return input_ids
-
-    def get_sequence_output(self, input_ids, attention_mask, return_hidden=False, is_momentum=False):
-        bs_pair = input_ids.size(0)
-        # logger.info("albert encoder")
-        # logger.info("input_ids.shape:{}".format(input_ids.shape))
-        if is_momentum:
-            sequence_hidden = self.text_encoder_k(input_ids, attention_mask=attention_mask)
-        else:
-            sequence_hidden = self.text_encoder(input_ids, attention_mask=attention_mask)
-        # logger.info("before sequence_hidden.shape:{}".format(sequence_hidden.shape))
-        if return_hidden:
-            sequence_hidden = sequence_hidden[0]
-        else:
-            sequence_hidden = sequence_hidden[1]
-
-        sequence_hidden = sequence_hidden.view(bs_pair, -1, sequence_hidden.size(-1))
-        sequence_hidden = sequence_hidden.squeeze()
-        # logger.info("after sequence_hidden1.shape:{}".format(sequence_hidden.shape))
-        return sequence_hidden
 
     def loose_similarity(self, sequence_output, visual_output):
         sequence_output, visual_output = sequence_output.contiguous(), visual_output.contiguous()
@@ -363,10 +348,10 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
         if self.training:
             # loss = 0.0
-            v1_fea = self.visual_encoder(video1, video_frame)
-            v2_fea = self.visual_encoder(video2, video_frame)
-            tag_fea = self.get_sequence_output(tag_ids, tag_mask)
-            title_fea = self.get_sequence_output(title_ids, title_mask)
+            v1_fea, v1_frame = self.visual_encoder(video1, video_frame)
+            v2_fea, v2_frame = self.visual_encoder(video2, video_frame)
+            tag_fea = self.text_encoder(tag_ids, tag_mask)
+            title_fea = self.text_encoder(title_ids, title_mask)
 
             # for video self supervised learning
             # [bs,hidden_size]
@@ -387,11 +372,12 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             # compute key features
             with torch.no_grad():  # no gradient to keys
                 self._momentum_update()  # update the key encoder
-                tag_fea_k = self.get_sequence_output(tag_ids, tag_mask, is_momentum=True)
-                title_fea_k = self.get_sequence_output(title_ids, title_mask, is_momentum=True)
+
+                tag_fea_k = self.text_encoder_k(tag_ids, tag_mask)
+                title_fea_k = self.text_encoder_k(title_ids, title_mask)
                 #
-                v1_fea_k = self.visual_encoder_k(video1, video_frame)
-                v2_fea_k = self.visual_encoder_k(video2, video_frame)
+                v1_fea_k, v1_frame_k = self.visual_encoder_k(video1, video_frame)
+                v2_fea_k, v2_frame_k = self.visual_encoder_k(video2, video_frame)
                 v1_proj_k = self.v_projector_k(v1_fea_k)
                 v2_proj_k = self.v_projector_k(v2_fea_k)
                 v1_cross_k, v2_cross_k, tag_cross_k, title_cross_k = self.get_cross_fea(v1_fea_k, v2_fea_k,
@@ -449,17 +435,28 @@ class BirdModel(BirdPreTrainedModel):
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
         self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
                                               requires_grad=True)
-        ################## chinese text Encoder
-        pretrained = self.task_config.pretrained_text
-        t_config = AutoConfig.from_pretrained(pretrained)
-        if self.rank == 0:
-            logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
-        self.text_encoder = AutoModel.from_pretrained(pretrained)
+        ################## text Encoder
+        self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
         self.visual_encoder = VisualEncoder(self.rank, cross_config)
         ################## loss function
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
+
+    def frame_loss(self, query_output, frame_output):
+        frame_num = frame_output.size(1)
+        loss = 0.
+        # for i in range(frame_num):
+        #     frame_single = frame_output[:, i, :].squeeze()
+        #     sim_matrix = self.loose_similarity(query_output, frame_single)
+        #     sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+        #     loss += sim_loss / frame_num
+        frame_single, _ = torch.max(frame_output, dim=1)
+        sim_matrix = self.loose_similarity(query_output, frame_single)
+        sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+        loss += sim_loss
+        return loss
+
 
     def forward(self, query_ids, query_mask, video_data, video_frame, idx, global_step):
         query_ids = query_ids.view(-1, query_ids.shape[-1])
@@ -470,19 +467,26 @@ class BirdModel(BirdPreTrainedModel):
             logger.info("video.shape:{}, dtype:{}".format(video.shape, video.dtype))
         if self.training:
             loss = 0.0
-            query_output = self.get_sequence_output(query_ids, query_mask)
-            visual_output = self.visual_encoder(video, video_frame)
+            query_output = self.text_encoder(query_ids, query_mask)
+            visual_output, frame_output = self.visual_encoder(video, video_frame)
             if self.rank == 0:
                 logger.info("query_output.shape:{},dtype:{}".format(query_output.shape, query_output.dtype))
                 logger.info("visual_output.shape:{},dtype:{}".format(visual_output.shape, visual_output.dtype))
+                logger.info("frame_output.shape:{},dtype:{}".format(frame_output.shape, frame_output.dtype))
 
             visual_output = dist_collect(visual_output).squeeze(1)
             query_output = dist_collect(query_output).squeeze(1)
+            frame_output = dist_collect(frame_output).squeeze(1)
 
             # in batch loss
             sim_matrix = self.loose_similarity(query_output, visual_output)
             sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
             loss += sim_loss
+
+            # frame loss
+            frame_loss = self.frame_loss(query_output, frame_output)
+            loss += frame_loss
+
             if self.rank == 0:
                 logger.info(
                     "sim_loss:{},type:{},sim_matrix.shape:{}".format(sim_loss, sim_loss.dtype, sim_matrix.shape))
@@ -502,12 +506,8 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
         self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
                                               requires_grad=True)
-        ################## chinese text Encoder
-        pretrained = self.task_config.pretrained_text
-        t_config = AutoConfig.from_pretrained(pretrained)
-        if self.rank == 0:
-            logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
-        self.text_encoder = AutoModel.from_pretrained(pretrained)
+        ################## text Encoder
+        self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
         self.visual_encoder = VisualEncoder(self.rank, cross_config)
 
@@ -524,9 +524,9 @@ class BirdModel_VT(BirdPreTrainedModel):
         video = torch.as_tensor(video_data)
         if self.training:
             loss = 0.0
-            query_output = self.get_sequence_output(query_ids, query_mask)
-            title_output = self.get_sequence_output(title_ids, title_mask)
-            visual_output = self.visual_encoder(video, video_frame)
+            query_output = self.text_encoder(query_ids, query_mask)
+            title_output = self.text_encoder(title_ids, title_mask)
+            visual_output, frame_output = self.visual_encoder(video, video_frame)
 
             visual_output = dist_collect(visual_output).squeeze(1)
             query_output = dist_collect(query_output).squeeze(1)
@@ -553,7 +553,7 @@ class BirdModel_VT(BirdPreTrainedModel):
 
 
 class MLP(nn.Module):
-    def __init__(self, in_dim=768, inner_dim=4096, out_dim=768, num_layers=2):
+    def __init__(self, in_dim=512, inner_dim=4096, out_dim=512, num_layers=2):
         super(MLP, self).__init__()
 
         # hidden layers

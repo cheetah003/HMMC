@@ -18,9 +18,10 @@ from sklearn import preprocessing
 from transformers import BertTokenizer, AutoTokenizer, AutoModel
 from tensorboardX import SummaryWriter
 from modules.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
+from modules.tokenization_clip import SimpleTokenizer as ClipTokenizer
 from modules.modeling import BirdModel_VT, BirdPreTrainedModel, BirdModel
 from modules.optimization import BertAdam
-from modules.until_module import get_dual_matrix, Pretrain_text_path
+from modules.until_module import get_dual_matrix
 from torch.utils.data import DataLoader
 from util import parallel_apply, get_logger
 from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_DataLoader
@@ -63,9 +64,9 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--max_frames', type=int, default=12, help='')
     parser.add_argument('--frame_sample', type=str, default="uniform", choices=["uniform", "random", "uniform_random"],
                         help='frame sample strategy')
-    parser.add_argument('--frame_sample_len', type=str, default="dynamic", choices=["dynamic", "fix"],
+    parser.add_argument('--frame_sample_len', type=str, default="fix", choices=["dynamic", "fix"],
                         help='use dynamic frame length of fix frame length')
-    parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english", "bilingual"],
+    parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english"],
                         help='language for text encoder')
     parser.add_argument('--train_path', type=str, default="/ai/swxdisk/data/bird/query_data_train_bilingual.json",
                         help='train data path')
@@ -439,10 +440,10 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
 
             logger.info("eval video.shape:{}".format(video.shape))
-            query_output = model.get_sequence_output(query_ids, query_mask)
-            visual_output = model.visual_encoder(video, video_frame)
+            query_output = model.text_encoder(query_ids, query_mask)
+            visual_output, frame_output = model.visual_encoder(video, video_frame)
             if args.task == "retrieval_VT":
-                title_output = model.get_sequence_output(title_ids, title_mask)
+                title_output = model.text_encoder(title_ids, title_mask)
                 logger.info("title_output.shape:{}".format(title_output.shape))
             elif args.task == "retrieval":
                 title_output = torch.zeros_like(query_output)
@@ -530,10 +531,12 @@ def main():
     device, n_gpu = init_device(args, args.local_rank)
 
     # get text pretrained path
-    pretrained_text = Pretrain_text_path[args.language]
-    logger.info("tokenizer:{}".format(pretrained_text))
-    tokenizer = BertTokenizer.from_pretrained(pretrained_text)
+    pretrained_text = "hfl/chinese-roberta-wwm-ext"
     args.pretrained_text = pretrained_text
+    if args.language == "chinese":
+        tokenizer = BertTokenizer.from_pretrained(pretrained_text)
+    else:
+        tokenizer = ClipTokenizer()
 
     model = init_model(args, device, n_gpu, args.local_rank)
     ## ####################################

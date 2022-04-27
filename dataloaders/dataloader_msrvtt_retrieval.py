@@ -56,7 +56,7 @@ class MSRVTT_DataLoader(VisionDataset):
         assert self.slice_framepos in [0, 1, 2]
 
         self.rawVideoExtractor = RawVideoExtractor(framerate=feature_framerate, size=image_resolution)
-        self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
+        self.SPECIAL_TOKEN = {"CLS_TOKEN": "<|startoftext|>", "SEP_TOKEN": "<|endoftext|>",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
         self.transform = transforms.Compose([
             transforms.RandomResizedCrop(self.resolution, scale=(0.2, 1.0)),
@@ -207,7 +207,7 @@ class MSRVTT_TrainDataLoader(VisionDataset):
                 self.children_video_ids[url_posfix].append(vid)
             self.sample_len = len(self.csv)
 
-        self.SPECIAL_TOKEN = {"CLS_TOKEN": "[CLS]", "SEP_TOKEN": "[SEP]",
+        self.SPECIAL_TOKEN = {"CLS_TOKEN": "<|startoftext|>", "SEP_TOKEN": "<|endoftext|>",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
         self.transform = transforms.Compose([
             transforms.RandomResizedCrop(self.resolution, scale=(0.2, 1.0)),

@@ -10,6 +10,7 @@ import logging
 import tarfile
 import tempfile
 import shutil
+import sys
 
 import torch
 from torch import nn
@@ -19,6 +20,7 @@ from .until_config import PretrainedConfig
 from .until_module import PreTrainedModel, LayerNorm, ACT2FN
 from collections import OrderedDict
 from modules.module_clip import build_model, CLIP
+from transformers import AutoConfig, AutoModel, BertTokenizer
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,20 @@ PRETRAINED_MODEL_ARCHIVE_MAP = {}
 CONFIG_NAME = 'cross_config.json'
 WEIGHTS_NAME = 'cross_pytorch_model.bin'
 
+
+def gelu(x):
+    """Implementation of the gelu activation function.
+        For information: OpenAI GPT's gelu is slightly different (and gives slightly different results):
+        0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+        Also see https://arxiv.org/abs/1606.08415
+    """
+    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+
+
+def swish(x):
+    return x * torch.sigmoid(x)
+
+ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
 
 class CrossConfig(PretrainedConfig):
     """Configuration class to store the configuration of a `CrossModel`.
@@ -136,10 +152,7 @@ class Transformer(nn.Module):
 class VisualEncoder(nn.Module):
     def __init__(self, local_rank, cross_config):
         super().__init__()
-        pretrained_clip_name = "ViT-B/32"
-        # pretrained_clip_name = "ViT-B/16"
-        # pretrained_clip_name = "RN101"
-
+        pretrained_clip_name = cross_config.pretrained_clip_name
         if local_rank == 0:
             logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
         clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
@@ -151,16 +164,12 @@ class VisualEncoder(nn.Module):
                                           heads=cross_config.temporal_attention_heads)
         self.frame_position_embeddings = nn.Embedding(cross_config.max_position_embeddings,
                                                       cross_config.temporal_hidden_size)
-        # [512, 768]
-        self.temporal_proj = nn.Linear(cross_config.temporal_hidden_size, cross_config.hidden_size)
-        # use clip.transformer to initial temporal_transformer
-        # for param_1, param_2 in zip(self.temporal_transformer.parameters(), clip.transformer.parameters()):
-        #     param_1.data.copy_(param_2.data)  # initialize
 
     def forward(self, video, video_frames):
         # encode frames
         bs = video.size(0)
         visual_hidden_list = []
+        frame_hidden_list = []
         for b in range(bs):
             # [frame, 3, 224, 224]
             video_frame = video_frames[b]
@@ -174,6 +183,7 @@ class VisualEncoder(nn.Module):
             # logger.info("visual_hidden1.shape:{}".format(visual_hidden.shape))
             # get temporal information
             visual_hidden_original = visual_hidden
+            frame_hidden_list.append(visual_hidden_original)
             seq_length = visual_hidden.size(0)
             position_ids = torch.arange(seq_length, dtype=torch.long, device=visual_hidden.device)
             # logger.info("position_ids.shape:{}".format(position_ids.shape))
@@ -186,16 +196,16 @@ class VisualEncoder(nn.Module):
             visual_hidden = self.temporal_transformer(visual_hidden, video_mask)
             # visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
             visual_hidden = visual_hidden + visual_hidden_original
-            # proj hidder: [bs, frames,512] -> [bs, frames,768]
-            visual_hidden = self.temporal_proj(visual_hidden)
-            # [bs, frames,512] -> [bs, 1,768]
+            # visual_hidden = visual_hidden_original
+            # [bs, frames,512] -> [bs, 1,512]
             # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
             visual_hidden = torch.mean(visual_hidden, dim=0)
             # logger.info("visual_hidden mean.shape:{}".format(visual_hidden.shape))
             visual_hidden_list.append(visual_hidden)
         visual_output = torch.stack(visual_hidden_list, dim=0)
+        frame_output = torch.stack(frame_hidden_list, dim=0)
         # logger.info("visual encoder visual_output.shape:{}".format(visual_output.shape))
-        return visual_output
+        return visual_output, frame_output
 
     def encode_image(self, image, return_hidden=False, video_frame=-1):
         if self.is_vit:
@@ -212,3 +222,119 @@ class VisualEncoder(nn.Module):
         if return_hidden:
             return x, hidden
         return x
+
+
+class TextEncoder(nn.Module):
+    def __init__(self, task_config, cross_config):
+        super().__init__()
+        self.language = task_config.language
+        if self.language == "english":
+            pretrained_clip_name = cross_config.pretrained_clip_name
+            if task_config.local_rank == 0:
+                logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
+            clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
+            clip = build_model(clip_state_dict, local_rank=task_config.local_rank)
+            self.token_embedding = copy.deepcopy(clip.token_embedding)
+            self.positional_embedding = copy.deepcopy(clip.positional_embedding)
+            self.transformer = copy.deepcopy(clip.transformer)
+            self.ln_final = copy.deepcopy(clip.ln_final)
+            self.text_projection = copy.deepcopy(clip.text_projection)
+        elif self.language == "chinese":
+            pretrained = task_config.pretrained_text
+            t_config = AutoConfig.from_pretrained(pretrained)
+            if task_config.rank == 0:
+                logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
+            self.chinese_encoder = AutoModel.from_pretrained(pretrained)
+            self.text_proj = nn.Linear(cross_config.chinese_hidden_size, cross_config.temporal_hidden_size)
+        else:
+            raise NotImplementedError("wrong language")
+
+    def forward(self, input_ids, attention_mask, return_hidden=False):
+        bs_pair = input_ids.size(0)
+        if self.language == "english":
+            text_output, hidden = self.encode_text(input_ids, return_hidden=True)
+        else:
+            temp_output = self.chinese_encoder(input_ids, attention_mask=attention_mask)
+            # logger.info("hidden:{},text_output:{}".format(temp_output[0].shape, temp_output[1].shape))
+            hidden = self.text_proj(temp_output[0])
+            text_output = self.text_proj(temp_output[1])
+
+
+        text_output = text_output.view(bs_pair, text_output.size(-1))
+        hidden = hidden.view(bs_pair, -1, hidden.size(-1))
+        if return_hidden:
+            return hidden
+        else:
+            return text_output
+
+    def encode_text(self, text, return_hidden=False):
+        x = self.token_embedding(text)  # [batch_size, n_ctx, d_model]
+
+        pos_emd = self.positional_embedding[:x.size(1), :]
+        x = x + pos_emd
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+
+        hidden = self.ln_final(x) @ self.text_projection
+
+        # x.shape = [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        x = hidden[torch.arange(hidden.shape[0]), text.argmax(dim=-1)]
+
+        if return_hidden:
+            return x, hidden
+
+        return x
+
+
+class BertLMPredictionHead(nn.Module):
+    def __init__(self, config):
+        super(BertLMPredictionHead, self).__init__()
+        self.transform = BertPredictionHeadTransform(config)
+
+        # The output weights are the same as the input embeddings, but there is
+        # an output-only bias for each token.
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size,bias=False,)
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.decoder.bias = self.bias
+
+    def forward(self, hidden_states):
+        hidden_states = self.transform(hidden_states)
+        hidden_states = self.decoder(hidden_states)
+        return hidden_states
+
+
+class BertPredictionHeadTransform(nn.Module):
+    def __init__(self, config):
+        super(BertPredictionHeadTransform, self).__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        if isinstance(config.hidden_act, str) or (
+            sys.version_info[0] == 2 and isinstance(config.hidden_act, unicode)
+        ):
+            self.transform_act_fn = ACT2FN[config.hidden_act]
+        else:
+            self.transform_act_fn = config.hidden_act
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.transform_act_fn(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states)
+        return hidden_states
+
+
+class BertLayerNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-12):
+        """Construct a layernorm module in the TF style (epsilon inside the square root).
+        """
+        super(BertLayerNorm, self).__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.bias = nn.Parameter(torch.zeros(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, x):
+        u = x.mean(-1, keepdim=True)
+        s = (x - u).pow(2).mean(-1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.variance_epsilon)
+        return self.weight * x + self.bias

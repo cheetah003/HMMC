@@ -25,12 +25,6 @@ from modules.until_config import PretrainedConfig
 
 logger = logging.getLogger(__name__)
 
-Pretrain_text_path = {
-    "chinese": "hfl/chinese-roberta-wwm-ext",
-    "english": "/root/.cache/huggingface/bert-base-uncased",
-    "bilingual": "bert-base-multilingual-uncased"
-}
-
 
 def gelu(x):
     """Implementation of the gelu activation function.
