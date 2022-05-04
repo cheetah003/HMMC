@@ -106,9 +106,9 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             self.tokenizer = ClipTokenizer()
         if self.rank == 0:
             logger.info("tokenizer:pad:{},cls:{},mask:{}, voacb_size:{}".format(self.tokenizer.pad_token_id,
-                                                                 type(self.tokenizer.cls_token_id),
-                                                                 self.tokenizer.mask_token_id,
-                                                                 self.tokenizer.vocab_size))
+                                                                                type(self.tokenizer.cls_token_id),
+                                                                                self.tokenizer.mask_token_id,
+                                                                                self.tokenizer.vocab_size))
         t_config = AutoConfig.from_pretrained(self.task_config.pretrained_text)
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         self.text_encoder_k = TextEncoder(self.task_config, cross_config)
@@ -137,16 +137,16 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                             ]
         self.copy_params()
         ################## create queue
-        self.register_buffer("queue_v1_self_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
-        self.register_buffer("queue_v2_self_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
-        self.register_buffer("queue_v1_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
-        self.register_buffer("queue_v2_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        self.register_buffer("queue_v_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        self.register_buffer("queue_frame_proj_ng", torch.randn(cross_config.temporal_hidden_size,
+                                                                self.contrast_num_negative * self.task_config.max_frames))
+        self.register_buffer("queue_frame_cross_ng", torch.randn(cross_config.temporal_hidden_size,
+                                                                 self.contrast_num_negative * self.task_config.max_frames))
         self.register_buffer("queue_title_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
         self.register_buffer("queue_tag_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
-        self.queue_v1_self_ng = F.normalize(self.queue_v1_self_ng, dim=0)
-        self.queue_v2_self_ng = F.normalize(self.queue_v2_self_ng, dim=0)
-        self.queue_v1_cross_ng = F.normalize(self.queue_v1_cross_ng, dim=0)
-        self.queue_v2_cross_ng = F.normalize(self.queue_v2_cross_ng, dim=0)
+        self.queue_v_cross_ng = F.normalize(self.queue_v_cross_ng, dim=0)
+        self.queue_frame_proj_ng = F.normalize(self.queue_frame_proj_ng, dim=0)
+        self.queue_frame_cross_ng = F.normalize(self.queue_frame_cross_ng, dim=0)
         self.queue_title_cross_ng = F.normalize(self.queue_title_cross_ng, dim=0)
         self.queue_tag_cross_ng = F.normalize(self.queue_tag_cross_ng, dim=0)
 
@@ -237,39 +237,43 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                 param_k.data = param_k.data * self.contrast_momentum + param.data * (1. - self.contrast_momentum)
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self, v1_self_k, v2_self_k, v1_cross_k, v2_cross_k, tag_cross_k, title_cross_k):
+    def _dequeue_and_enqueue(self, v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k):
 
         # gather keys before updating queue
-        v1_self_k = dist_collect(v1_self_k).squeeze()
-        v1_self_k = F.normalize(v1_self_k, dim=1)
-        v2_self_k = dist_collect(v2_self_k).squeeze()
-        v2_self_k = F.normalize(v2_self_k, dim=1)
-        v1_cross_k = dist_collect(v1_cross_k).squeeze()
-        v1_cross_k = F.normalize(v1_cross_k, dim=1)
-        v2_cross_k = dist_collect(v2_cross_k).squeeze()
-        v2_cross_k = F.normalize(v2_cross_k, dim=1)
-        tag_cross_k = dist_collect(tag_cross_k).squeeze()
-        tag_cross_k = F.normalize(tag_cross_k, dim=1)
-        title_cross_k = dist_collect(title_cross_k).squeeze()
-        title_cross_k = F.normalize(title_cross_k, dim=1)
+        # [bs,hidden]
+        v_fea_k = dist_collect(v_fea_k).squeeze()
+        v_fea_k = F.normalize(v_fea_k, dim=1)
+        tag_fea_k = dist_collect(tag_fea_k).squeeze()
+        tag_fea_k = F.normalize(tag_fea_k, dim=1)
+        title_fea_k = dist_collect(title_fea_k).squeeze()
+        title_fea_k = F.normalize(title_fea_k, dim=1)
+        # [bs,frame,hidden]
+        frame_fea_k = dist_collect(frame_fea_k).squeeze()
+        frame_fea_k = F.normalize(frame_fea_k, dim=2)
+        frame_proj_k = dist_collect(frame_proj_k).squeeze()
+        frame_proj_k = F.normalize(frame_proj_k, dim=2)
 
-        batch_size = v1_self_k.size(0)
+        batch_size = v_fea_k.size(0)
+        frame_num = frame_fea_k.size(1)
+        frame_fea_k = frame_fea_k.view(-1, frame_fea_k.size(-1))
+        frame_proj_k = frame_proj_k.view(-1, frame_proj_k.size(-1))
+
         ptr = int(self.queue_ptr)
         if self.rank == 0:
             logger.info(
-                "begin>>>>: ptr:{},batch_size:{},queue_size:{}".format(ptr, batch_size, self.contrast_num_negative))
-            logger.info("v1_self_k.shape:{},tag_cross_k.shape:{}".format(v1_self_k.shape, tag_cross_k.shape))
+                "begin>>>>: ptr:{},batch_size:{},frame_num:{},queue_size:{}".format(ptr, batch_size, frame_num, self.contrast_num_negative))
+            logger.info("v1_self_k.shape:{},tag_cross_k.shape:{},frame_proj_k.shape:{}".format(v_fea_k.shape, tag_fea_k.shape, frame_proj_k.shape))
 
         # replace the keys at ptr (dequeue and enqueue)
-        self.queue_v1_self_ng[:, ptr:ptr + batch_size] = v1_self_k.T
-        self.queue_v2_self_ng[:, ptr:ptr + batch_size] = v2_self_k.T
-        self.queue_v1_cross_ng[:, ptr:ptr + batch_size] = v1_cross_k.T
-        self.queue_v2_cross_ng[:, ptr:ptr + batch_size] = v2_cross_k.T
-        self.queue_tag_cross_ng[:, ptr:ptr + batch_size] = tag_cross_k.T
-        self.queue_title_cross_ng[:, ptr:ptr + batch_size] = title_cross_k.T
+        self.queue_v_cross_ng[:, ptr:ptr + batch_size] = v_fea_k.T
+        self.queue_tag_cross_ng[:, ptr:ptr + batch_size] = tag_fea_k.T
+        self.queue_title_cross_ng[:, ptr:ptr + batch_size] = title_fea_k.T
 
+        self.queue_frame_proj_ng[:, ptr * frame_num:(ptr + batch_size) * frame_num] = frame_proj_k.T
+        self.queue_frame_cross_ng[:, ptr * frame_num:(ptr + batch_size) * frame_num] = frame_fea_k.T
         # move pointer
         ptr = (ptr + batch_size) % self.contrast_num_negative
+
         if self.rank == 0:
             logger.info("end>>>>: ptr:{}".format(ptr))
         self.queue_ptr[0] = ptr
@@ -303,72 +307,55 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
         return F.cross_entropy(logits, labels)
 
-    def get_cross_fea(self, v1_fea, v2_fea, v1_proj, v2_proj, tag_fea, title_fea, is_momentum=False):
-        if self.task_config.cross_MLP == "VT_MLP":
-            v1_cross = v1_proj
-            v2_cross = v2_proj
-            if is_momentum:
-                tag_cross = self.t_projector_k(tag_fea)
-                title_cross = self.t_projector_k(title_fea)
-            else:
-                tag_cross = self.t_projector(tag_fea)
-                title_cross = self.t_projector(title_fea)
-        elif self.task_config.cross_MLP == "V_MLP":
-            v1_cross = v1_proj
-            v2_cross = v2_proj
-            tag_cross = tag_fea
-            title_cross = title_fea
-        elif self.task_config.cross_MLP == "T_MLP":
-            v1_cross = v1_fea
-            v2_cross = v2_fea
-            if is_momentum:
-                tag_cross = self.t_projector_k(tag_fea)
-                title_cross = self.t_projector_k(title_fea)
-            else:
-                tag_cross = self.t_projector(tag_fea)
-                title_cross = self.t_projector(title_fea)
-        else:
-            v1_cross = v1_fea
-            v2_cross = v2_fea
-            tag_cross = tag_fea
-            title_cross = title_fea
-        return v1_cross, v2_cross, tag_cross, title_cross
+    def frame_self_loss(self, frame_fea, frame_fea_k, queue_frame_ng):
+        loss = 0.
+        for i in range(frame_fea.size(1) - 1):
+            frame_loss = self.contrastive_loss(frame_fea[:, i, :], frame_fea_k[:, i, :], queue_frame_ng) + \
+                         self.contrastive_loss(frame_fea[:, i, :], frame_fea_k[:, i + 1, :], queue_frame_ng)
+            loss += frame_loss
+        loss = loss / (frame_fea.size(1) - 1)
+        return loss
 
-    def forward(self, video_data1, video_data2, video_frame, tag_ids, tag_mask, title_ids, title_mask, global_step):
+    def frame_cross_loss(self, frame_fea, frame_fea_k, queue_frame_ng, text_fea, text_fea_k, queue_text_ng):
+        loss = 0.
+        for i in range(frame_fea.size(1)):
+            frame_loss = self.contrastive_loss(text_fea, frame_fea_k[:, i, :], queue_frame_ng) + \
+                         self.contrastive_loss(frame_fea[:, i, :], text_fea_k, queue_text_ng)
+            loss += frame_loss
+        loss = loss / frame_fea.size(1)
+        return loss
+
+    def forward(self, video_data, video_frame, tag_ids, tag_mask, title_ids, title_mask, global_step):
         tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
         tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
         title_ids = title_ids.view(-1, title_ids.shape[-1])
         title_mask = title_mask.view(-1, title_mask.shape[-1])
         # bs x frames x 3 x H x W
-        video1 = torch.as_tensor(video_data1)
-        video2 = torch.as_tensor(video_data2)
+        video = torch.as_tensor(video_data)
 
         if self.rank == 0:
-            logger.info("video1.shape:{}, dtype:{}, device:{}".format(video1.shape, video1.dtype, video1.device))
+            logger.info("video1.shape:{}, dtype:{}, device:{}".format(video.shape, video.dtype, video.device))
 
         if self.training:
             # loss = 0.0
-            v1_fea, v1_frame = self.visual_encoder(video1, video_frame)
-            v2_fea, v2_frame = self.visual_encoder(video2, video_frame)
+            v_fea, frame_fea = self.visual_encoder(video, video_frame)
             tag_fea = self.text_encoder(tag_ids, tag_mask)
             title_fea = self.text_encoder(title_ids, title_mask)
 
             # for video self supervised learning
             # [bs,hidden_size]
-            v1_proj = self.v_projector(v1_fea)
-            v1_pred = self.v_predictor(v1_proj)
-            # [bs,hidden_size]
-            v2_proj = self.v_projector(v2_fea)
-            v2_pred = self.v_predictor(v2_proj)
-            # [bs,hidden_size]
-            v1_cross, v2_cross, tag_cross, title_cross = self.get_cross_fea(v1_fea, v2_fea, v1_proj,
-                                                                            v2_proj, tag_fea, title_fea)
-
-            # if self.rank == 0:
-            #     logger.info("video1_fea.shape:{}".format(v1_fea.shape))
-            #     logger.info("v1_proj.shape:{}".format(v1_proj.shape))
-            #     logger.info("v1_pred.shape:{}".format(v1_pred.shape))
-            #     logger.info("title_fea.shape:{}".format(title_fea.shape))
+            bs, frame, hidden = frame_fea.shape
+            frame_fea = frame_fea.view(-1, hidden)
+            frame_proj = self.v_projector(frame_fea)
+            frame_pred = self.v_predictor(frame_proj)
+            frame_fea = frame_fea.view(bs, frame, hidden)
+            frame_proj = frame_proj.view(bs, frame, hidden)
+            frame_pred = frame_pred.view(bs, frame, hidden)
+            if self.rank == 0:
+                logger.info("v_fea.shape:{},device:{}".format(v_fea.shape, v_fea.device))
+                logger.info("frame_fea.shape:{},device:{}".format(frame_fea.shape, frame_fea.device))
+                logger.info("frame_proj.shape:{},device:{}".format(frame_proj.shape, frame_proj.device))
+                logger.info("title_fea.shape:{}".format(title_fea.shape))
             # compute key features
             with torch.no_grad():  # no gradient to keys
                 self._momentum_update()  # update the key encoder
@@ -376,34 +363,36 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                 tag_fea_k = self.text_encoder_k(tag_ids, tag_mask)
                 title_fea_k = self.text_encoder_k(title_ids, title_mask)
                 #
-                v1_fea_k, v1_frame_k = self.visual_encoder_k(video1, video_frame)
-                v2_fea_k, v2_frame_k = self.visual_encoder_k(video2, video_frame)
-                v1_proj_k = self.v_projector_k(v1_fea_k)
-                v2_proj_k = self.v_projector_k(v2_fea_k)
-                v1_cross_k, v2_cross_k, tag_cross_k, title_cross_k = self.get_cross_fea(v1_fea_k, v2_fea_k,
-                                                        v1_proj_k, v2_proj_k, tag_fea_k, title_fea_k, is_momentum=True)
+                v_fea_k, frame_fea_k = self.visual_encoder_k(video, video_frame)
+                frame_fea_k = frame_fea_k.view(-1, hidden)
+                frame_proj_k = self.v_projector_k(frame_fea_k)
+                frame_fea_k = frame_fea_k.view(bs, frame, hidden)
+                frame_proj_k = frame_proj_k.view(bs, frame, hidden)
 
             # compute loss
             if self.rank == 0:
                 logger.info(
-                    "dtype: v1_fea:{},v1_fea_k:{},title_fea:{}".format(v1_fea.dtype, v1_fea_k.dtype, title_fea.dtype))
+                    "dtype: v_fea:{},v_fea_k:{},title_fea:{}".format(v_fea.dtype, v_fea_k.dtype, title_fea.dtype))
             # single modality: video queue loss
-            v_queue_loss = self.contrastive_loss(v1_pred, v2_proj_k, self.queue_v2_self_ng) \
-                           + self.contrastive_loss(v2_pred, v1_proj_k, self.queue_v1_self_ng)
-
+            v_queue_loss = self.frame_self_loss(frame_pred, frame_proj_k, self.queue_frame_proj_ng)
             # cross modality: queue loss
-            v1_tag_queue_loss = self.contrastive_loss(v1_cross, tag_cross_k, self.queue_tag_cross_ng) \
-                                + self.contrastive_loss(tag_cross, v1_cross_k, self.queue_v1_cross_ng)
-            v1_title_queue_loss = self.contrastive_loss(v1_cross, title_cross_k, self.queue_title_cross_ng) \
-                                  + self.contrastive_loss(title_cross, v1_cross_k, self.queue_v1_cross_ng)
-            v2_tag_queue_loss = self.contrastive_loss(v2_cross, tag_cross_k, self.queue_tag_cross_ng) \
-                                + self.contrastive_loss(tag_cross, v2_cross_k, self.queue_v2_cross_ng)
-            v2_title_queue_loss = self.contrastive_loss(v2_cross, title_cross_k, self.queue_title_cross_ng) \
-                                  + self.contrastive_loss(title_cross, v2_cross_k, self.queue_v2_cross_ng)
-            cross_queue_loss = (v1_tag_queue_loss + v1_title_queue_loss + v2_tag_queue_loss + v2_title_queue_loss) / 4
-
+            cross_queue_loss = 0.
+            v_tag_queue_loss = self.contrastive_loss(v_fea, tag_fea_k, self.queue_tag_cross_ng) \
+                               + self.contrastive_loss(tag_fea, v_fea_k, self.queue_v_cross_ng)
+            v_title_queue_loss = self.contrastive_loss(v_fea, title_fea_k, self.queue_title_cross_ng) \
+                                 + self.contrastive_loss(title_fea, v_fea_k, self.queue_v_cross_ng)
+            video_cross_loss = (v_tag_queue_loss + v_title_queue_loss) / 2
+            cross_queue_loss += video_cross_loss
+            frame_cross_loss = 0.
+            if self.task_config.use_frame_fea:
+                frame_tag_loss = self.frame_cross_loss(frame_fea, frame_fea_k, self.queue_frame_cross_ng, tag_fea,
+                                                       tag_fea_k, self.queue_tag_cross_ng)
+                frame_title_loss = self.frame_cross_loss(frame_fea, frame_fea_k, self.queue_frame_cross_ng, title_fea,
+                                                         title_fea_k, self.queue_title_cross_ng)
+                frame_cross_loss += (frame_tag_loss + frame_title_loss) / 2
+                cross_queue_loss += frame_cross_loss
             # dequeue_and_enqueue
-            self._dequeue_and_enqueue(v1_proj_k, v2_proj_k, v1_cross_k, v2_cross_k, tag_cross_k, title_cross_k)
+            self._dequeue_and_enqueue(v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k)
 
             # for MLM loss
             mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
@@ -414,13 +403,11 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             # loss += inbatch_loss + v_queue_loss + cross_queue_loss + mlm_loss
             loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * mlm_loss
             if self.rank == 0:
-                logger.info("v1_tag_queue_loss:{},v1_title_queue_loss:{},v2_tag_queue_loss:{},v2_title_queue_loss:{}"
-                            "".format(v1_tag_queue_loss, v1_title_queue_loss, v2_tag_queue_loss, v2_title_queue_loss))
-                logger.info("loss:{},v_queue_loss:{},cross_queue_loss:{},mlm_loss:{}"
-                            "".format(loss, v_queue_loss, cross_queue_loss, mlm_loss))
+                logger.info("loss:{},v_queue_loss:{},video_cross_loss:{},frame_cross_loss:{},mlm_loss:{}"
+                            "".format(loss, v_queue_loss, video_cross_loss, frame_cross_loss, mlm_loss))
                 if self.task_config.logdir:
-                    loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss),
-                                 "cross_queue_loss": float(cross_queue_loss), "mlm_loss": float(mlm_loss)}
+                    loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss), "video_cross_loss": float(video_cross_loss),
+                                 "frame_cross_loss": float(frame_cross_loss), "mlm_loss": float(mlm_loss)}
                     self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
             return loss
         else:
@@ -433,8 +420,7 @@ class BirdModel(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
-                                              requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
@@ -446,17 +432,16 @@ class BirdModel(BirdPreTrainedModel):
     def frame_loss(self, query_output, frame_output):
         frame_num = frame_output.size(1)
         loss = 0.
-        # for i in range(frame_num):
-        #     frame_single = frame_output[:, i, :].squeeze()
-        #     sim_matrix = self.loose_similarity(query_output, frame_single)
-        #     sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-        #     loss += sim_loss / frame_num
-        frame_single, _ = torch.max(frame_output, dim=1)
-        sim_matrix = self.loose_similarity(query_output, frame_single)
-        sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-        loss += sim_loss
+        for i in range(frame_num):
+            frame_single = frame_output[:, i, :].squeeze()
+            sim_matrix = self.loose_similarity(query_output, frame_single)
+            sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            loss += sim_loss / frame_num
+        # frame_single, _ = torch.max(frame_output, dim=1)
+        # sim_matrix = self.loose_similarity(query_output, frame_single)
+        # sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+        # loss += sim_loss
         return loss
-
 
     def forward(self, query_ids, query_mask, video_data, video_frame, idx, global_step):
         query_ids = query_ids.view(-1, query_ids.shape[-1])
@@ -484,12 +469,14 @@ class BirdModel(BirdPreTrainedModel):
             loss += sim_loss
 
             # frame loss
-            frame_loss = self.frame_loss(query_output, frame_output)
-            loss += frame_loss
+            if self.task_config.use_frame_fea:
+                frame_loss = self.frame_loss(query_output, frame_output)
+                loss += frame_loss
 
             if self.rank == 0:
                 logger.info(
-                    "sim_loss:{},type:{},sim_matrix.shape:{}".format(sim_loss, sim_loss.dtype, sim_matrix.shape))
+                    "loss:{},frame_loss:{},sim_loss:{},type:{},sim_matrix.shape:{}".format(loss, loss - sim_loss,
+                                                                                           sim_loss, sim_loss.dtype, sim_matrix.shape))
 
                 if self.task_config.logdir:
                     self.task_config.writer.add_scalar('loss', float(loss), global_step=global_step)
@@ -504,8 +491,7 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32),
-                                              requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder

@@ -24,11 +24,8 @@ from modules.optimization import BertAdam
 from modules.until_module import get_dual_matrix
 from torch.utils.data import DataLoader
 from util import parallel_apply, get_logger
-from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_DataLoader
 from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val
-from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader
-from dataloaders.dataloader_msvd_retrieval import MSVD_DataLoader
-from dataloaders.dataloader_lsmdc_retrieval import LSMDC_DataLoader
+from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader, MSRVTT_DataLoader
 
 try:
     # noinspection PyUnresolvedReferences
@@ -47,6 +44,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--do_params", action='store_true', help="text the params of the model.")
+    parser.add_argument("--use_frame_fea", action='store_true', help="whether use frame feature matching text")
     parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
     parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt"],
@@ -58,6 +56,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--batch_size', type=int, default=256, help='batch size')
     parser.add_argument('--batch_size_val', type=int, default=3500, help='batch size eval')
     parser.add_argument('--lr_decay', type=float, default=0.9, help='Learning rate exp epoch decay')
+    parser.add_argument('--weight_decay', type=float, default=0.2, help='Learning rate exp epoch decay')
     parser.add_argument('--n_display', type=int, default=100, help='Information display frequence')
     parser.add_argument('--seed', type=int, default=42, help='random seed')
     parser.add_argument('--max_words', type=int, default=32, help='')
@@ -78,7 +77,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--cross_model", default="cross-base", type=str, required=False, help="Cross module")
     parser.add_argument("--init_model", default=None, type=str, required=False, help="Initial model.")
-    parser.add_argument("--warmup_proportion", default=0.1, type=float,
+    parser.add_argument("--warmup_proportion", default=0.05, type=float,
                         help="Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10%% of training.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
@@ -201,7 +200,7 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
     no_decay_noclip_param_tp = [(n, p) for n, p in no_decay_param_tp if
                                 ("visual_encoder.visual." not in n) and ("text_encoder." not in n)]
 
-    weight_decay = 0.2
+    weight_decay = args.weight_decay
     optimizer_grouped_parameters = [
         {'params': [p for n, p in decay_clip_param_tp], 'weight_decay': weight_decay, 'lr': args.lr * coef_lr},
         {'params': [p for n, p in decay_chinesebert_param_tp], 'weight_decay': weight_decay, 'lr': args.text_lr},
@@ -223,7 +222,7 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                                                       output_device=local_rank, find_unused_parameters=True)
     if args.local_rank == 0:
         for name, parameters in model.named_parameters():
-            print("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
+            logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
     return optimizer, scheduler, model
 
 
@@ -390,27 +389,36 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     return total_loss, global_step
 
 
-def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list, batch_title_output_list):
+def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list, batch_title_output_list,
+                       batch_frame_output_list):
     sim_matrix = []
     sim_matrix_title = []
+    sim_matrix_frame = []
     for idx1, query_output in enumerate(batch_query_output_list):
         each_row = []
         title_each_row = []
-        for idx2, (visual_output, title_output) in enumerate(zip(batch_visual_output_list, batch_title_output_list)):
+        frame_each_row = []
+        for idx2, (visual_output, title_output, frame_output) in enumerate(zip(batch_visual_output_list,
+                                                                    batch_title_output_list, batch_frame_output_list)):
             b1b2_logits = model.loose_similarity(query_output, visual_output)
             title_logits = model.loose_similarity(query_output, title_output)
+            frame_logits = model.loose_similarity(query_output, frame_output)
             b1b2_logits = b1b2_logits.cpu().detach().numpy()
             title_logits = title_logits.cpu().detach().numpy()
+            frame_logits = frame_logits.cpu().detach().numpy()
             each_row.append(b1b2_logits)
             title_each_row.append(title_logits)
+            frame_each_row.append(frame_logits)
 
         each_row = np.concatenate(tuple(each_row), axis=-1)
         title_each_row = np.concatenate(tuple(title_each_row), axis=-1)
+        frame_each_row = np.concatenate(tuple(frame_each_row), axis=-1)
         # sim_matrix.append(preprocessing.scale(each_row, axis=1))
         sim_matrix.append(each_row)
         sim_matrix_title.append(title_each_row)
+        sim_matrix_frame.append(frame_each_row)
     # logger.info("sim_matrix:{}".format(sim_matrix))
-    return sim_matrix, sim_matrix_title
+    return sim_matrix, sim_matrix_title, sim_matrix_frame
 
 
 def eval_epoch(args, model, test_dataloader, device, n_gpu):
@@ -425,6 +433,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
     with torch.no_grad():
         batch_query_output_list, batch_visual_output_list = [], []
         batch_title_output_list = []
+        batch_frame_output_list = []
         # ----------------------------
         # 1. cache the features
         # ----------------------------
@@ -442,6 +451,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             logger.info("eval video.shape:{}".format(video.shape))
             query_output = model.text_encoder(query_ids, query_mask)
             visual_output, frame_output = model.visual_encoder(video, video_frame)
+            frame_output = torch.mean(frame_output, dim=1)
             if args.task == "retrieval_VT":
                 title_output = model.text_encoder(title_ids, title_mask)
                 logger.info("title_output.shape:{}".format(title_output.shape))
@@ -452,10 +462,12 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
 
             logger.info("query_output.shape:{}".format(query_output.shape))
             logger.info("visual_output.shape:{}".format(visual_output.shape))
+            logger.info("frame_output.shape:{}".format(frame_output.shape))
 
             batch_query_output_list.append(query_output)
             batch_visual_output_list.append(visual_output)
             batch_title_output_list.append(title_output)
+            batch_frame_output_list.append(frame_output)
 
         # ----------------------------------
         # 2. calculate the similarity
@@ -467,6 +479,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             batch_t_output_splits = []
             batch_v_output_splits = []
             batch_title_output_splits = []
+            batch_frame_output_splits = []
             bacth_len = len(batch_query_output_list)
             split_len = (bacth_len + n_gpu - 1) // n_gpu
             for dev_id in device_ids:
@@ -475,6 +488,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_t_output_splits.append(batch_query_output_list[s_:e_])
                     batch_v_output_splits.append(batch_visual_output_list)
                     batch_title_output_splits.append(batch_title_output_list)
+                    batch_frame_output_splits.append(batch_frame_output_list)
                 else:
                     devc = torch.device('cuda:{}'.format(str(dev_id)))
 
@@ -484,26 +498,38 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_v_output_splits.append(devc_batch_list)
                     devc_batch_list = [b.to(devc) for b in batch_title_output_list]
                     batch_title_output_splits.append(devc_batch_list)
+                    devc_batch_list = [b.to(devc) for b in batch_frame_output_list]
+                    batch_frame_output_splits.append(devc_batch_list)
 
             parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id],
-                                      batch_title_output_splits[dev_id]) for dev_id in device_ids]
+                        batch_title_output_splits[dev_id], batch_frame_output_splits[dev_id]) for dev_id in device_ids]
             parallel_outputs_tuple = parallel_apply(_run_on_single_gpu, model, parameters_tuple_list, device_ids)
             sim_matrix = []
             sim_matrix_title = []
+            sim_matrix_frame = []
             for idx in range(len(parallel_outputs_tuple)):
-                parallel_outputs, parallel_outputs_title = parallel_outputs_tuple[idx]
+                parallel_outputs, parallel_outputs_title, parallel_outputs_frame = parallel_outputs_tuple[idx]
                 sim_matrix += parallel_outputs
                 sim_matrix_title += parallel_outputs_title
+                sim_matrix_frame += parallel_outputs_frame
             sim_matrix = np.concatenate(tuple(sim_matrix), axis=0)
             sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
+            sim_matrix_frame = np.concatenate(tuple(sim_matrix_frame), axis=0)
         else:
             sim_matrix_tuple = _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
-                                                  batch_title_output_list)
-            sim_matrix, sim_matrix_title = sim_matrix_tuple
+                                                  batch_title_output_list, batch_frame_output_list)
+            sim_matrix, sim_matrix_title, sim_matrix_frame = sim_matrix_tuple
             sim_matrix = np.concatenate(tuple(sim_matrix), axis=0)
             sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
+            sim_matrix_frame = np.concatenate(tuple(sim_matrix_frame), axis=0)
+
+        logger.info("sim_matrix:{}".format(sim_matrix))
+        if args.use_frame_fea:
+            logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
+            sim_matrix = sim_matrix + sim_matrix_frame
 
         if args.task == "retrieval_VT":
+            logger.info("sim_matrix_title:{}".format(sim_matrix_title))
             sim_matrix = sim_matrix + sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
@@ -609,7 +635,7 @@ def main():
                 # for name, param in model.named_parameters():
                     # args.writer.add_histogram(name, param.clone().cpu().data.numpy(), epoch)
                     # writer.add_histogram(name + '/grad', param.requires_grad_().clone().cpu().data.numpy(), epoch)
-                if epoch % 2 == 0:
+                if epoch % 1 == 0:
                     ## Uncomment if want to save checkpoint
                     # save_model(epoch, args, model, type_name="")
                     # if epoch == 100:

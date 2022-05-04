@@ -168,23 +168,19 @@ class dataload_bird_pretrain(VisionDataset):
             # assert g_lmdb_frames % frames == 0
             video_index = list(np.arange(0, g_lmdb_frames))
             # print("video_index:{}".format(video_index))
-            sample_slice1 = list()
-            sample_slice2 = list()
+            sample_slice = list()
             k = g_lmdb_frames // frames
             for i in np.arange(frames):
-                index = random.sample(video_index[k * i:k * (i + 1)], 2)
-                sample_slice1.append(index[0])
-                sample_slice2.append(index[1])
-            sample_slice = sample_slice1 + sample_slice2
+                index = random.sample(video_index[k * i:k * (i + 1)], 1)
+                sample_slice.append(index[0])
         elif self.frame_sample == "random":
-            video_index = np.arange(0, g_lmdb_frames)
-            sample_slice = random.sample(list(video_index), frames * 2)
-            sample_slice1 = sorted(sample_slice[0:frames])
-            sample_slice2 = sorted(sample_slice[frames:2 * frames])
-            sample_slice = sample_slice1 + sample_slice2
+            # sample
+            video_index = list(np.arange(0, g_lmdb_frames))
+            sample_slice = random.sample(video_index, frames)
+            sample_slice = sorted(sample_slice)
         else:
             sample_slice = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
-        # random sample end ##################################################
+            # random sample end ##################################################
         for step, i in enumerate(sample_slice):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
@@ -202,21 +198,17 @@ class dataload_bird_pretrain(VisionDataset):
             # print("[{}]frame_data.shape:{}".format(step, frame_data.shape))
             video_list.append(frame_data)
         video_data = np.stack(video_list)
-        # print("video data.shape:{}".format(video_data.shape))
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([2 * frames, 3, self.resolution, self.resolution])
-        video_data1 = video_data[:frames, :, :, :]
-        video_data2 = video_data[frames:2 * frames, :, :, :]
+        video_data = video_data.reshape([frames, 3, self.resolution, self.resolution])
         if self.frame_sample_len == "dynamic":
             # dynamic frame needs pad
             if frames < self.max_frames:
                 pad = np.zeros([self.max_frames - frames, 3, self.resolution, self.resolution],
                                dtype=np.float32)
-                video_data1 = np.concatenate((video_data1, pad), axis=0)
-                video_data2 = np.concatenate((video_data2, pad), axis=0)
+                video_data = np.concatenate((video_data, pad), axis=0)
 
-        return video_data1, video_data2
+        return video_data
 
     def __getitem__(self, index: int):
         """
@@ -236,7 +228,7 @@ class dataload_bird_pretrain(VisionDataset):
             # fix frame
             frames = self.max_frames
         video_key = "Video" + item['docid']
-        video_data1, video_data2 = self._get_video(video_key, frames)
+        video_data = self._get_video(video_key, frames)
         if self.language == "chinese":
             tag_text = item['tag']
             title_text = item['title']
@@ -249,7 +241,8 @@ class dataload_bird_pretrain(VisionDataset):
         tag_ids, tag_mask, _ = self._get_text(tag_text, self.tag_max_words)
         title_ids, title_mask, _ = self._get_text(title_text, self.title_max_words)
 
-        return video_data1, video_data2, frames, tag_ids, tag_mask, title_ids, title_mask
+        return video_data, frames, tag_ids, tag_mask, title_ids, title_mask
+
     def __len__(self) -> int:
         return self._length
 

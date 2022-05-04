@@ -196,6 +196,7 @@ class VisualEncoder(nn.Module):
             visual_hidden = self.temporal_transformer(visual_hidden, video_mask)
             # visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
             visual_hidden = visual_hidden + visual_hidden_original
+            # for clip zero shot
             # visual_hidden = visual_hidden_original
             # [bs, frames,512] -> [bs, 1,512]
             # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
