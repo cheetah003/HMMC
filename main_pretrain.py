@@ -21,10 +21,8 @@ from modules.tokenization_clip import SimpleTokenizer as ClipTokenizer
 from modules.modeling import BirdModel_VT, BirdPreTrainedModel, BirdModel
 from modules.optimization import BertAdam
 from modules.until_module import get_dual_matrix
-from torch.utils.data import DataLoader
+from dataloaders.dataloader import DATALOADER_DICT
 from util import parallel_apply, get_logger
-from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val
-from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_DataLoader, MSRVTT_prerainDataLoader
 
 try:
     # noinspection PyUnresolvedReferences
@@ -79,7 +77,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--cross_model", default="cross-base", type=str, required=False, help="Cross module")
     parser.add_argument("--init_model", default=None, type=str, required=False, help="Initial model.")
-    parser.add_argument("--warmup_proportion", default=0.05, type=float,
+    parser.add_argument("--warmup_proportion", default=0.2, type=float,
                         help="Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10%% of training.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
@@ -222,64 +220,6 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
     return optimizer, scheduler, model
 
 
-def dataloader_bird_pretrain(args, tokenizer):
-    bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/videoinfo_lmdb', language=args.language,
-                                          json_path=args.pretrain_path, tokenizer=tokenizer, max_frames=args.max_frames,
-                                          frame_sample=args.frame_sample, frame_sample_len=args.frame_sample_len)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
-    dataloader = DataLoader(
-        bird_dataset,
-        batch_size=args.batch_size // args.n_gpu,
-        num_workers=args.num_thread_reader,
-        pin_memory=True,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-    )
-    return dataloader, len(bird_dataset), train_sampler
-
-
-def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
-                                     json_path=args.val_path, tokenizer=tokenizer, max_frames=args.max_frames,
-                                     frame_sample_len=args.frame_sample_len, task=args.task)
-    dataloader = DataLoader(
-        bird_testset,
-        batch_size=args.batch_size_val,
-        num_workers=args.num_thread_reader,
-        shuffle=False,
-        drop_last=False,
-    )
-    return dataloader, len(bird_testset)
-
-
-def dataloader_msrvtt_pretrain(args, tokenizer):
-    msrvtt_trainset = MSRVTT_prerainDataLoader(tokenizer=tokenizer, max_frames=args.max_frames)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(msrvtt_trainset)
-    dataloader = DataLoader(
-        msrvtt_trainset,
-        batch_size=args.batch_size // args.n_gpu,
-        num_workers=args.num_thread_reader,
-        pin_memory=True,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-    )
-    return dataloader, len(msrvtt_trainset), train_sampler
-
-
-def dataloader_msrvtt_test(args, tokenizer):
-    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, max_frames=args.max_frames,)
-    dataloader = DataLoader(
-        msrvtt_testset,
-        batch_size=args.batch_size_val,
-        num_workers=args.num_thread_reader,
-        shuffle=False,
-        drop_last=False,
-    )
-    return dataloader, len(msrvtt_testset)
-
-
 def save_model(epoch, args, model, type_name=""):
     # Only save the model it-self
     model_to_save = model.module if hasattr(model, 'module') else model
@@ -342,7 +282,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
         total_loss += float(loss)
         forward_and_backward_time = time.time()
         if args.local_rank == 0:
-            logger.info("[{}]forward_and_backward_time :{}".format(args.local_rank, forward_and_backward_time - load_finish_time))
+            logger.info("[{}]forward_and_backward_time :{}".format(args.local_rank,
+                                                                   forward_and_backward_time - load_finish_time))
         if (step + 1) % args.gradient_accumulation_steps == 0:
             if args.fp16_opt_level != "O0":
                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
@@ -354,7 +295,6 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
 
             optimizer.step()
             optimizer.zero_grad()
-
 
             if global_step % log_step == 0 and local_rank == 0:
                 logger.info("Epoch: %d/%s, Step: %d/%d, Lr: %s, Loss: %f, Time/step: %f", epoch + 1,
@@ -384,7 +324,8 @@ def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
         title_each_row = []
         frame_each_row = []
         for idx2, (visual_output, title_output, frame_output) in enumerate(zip(batch_visual_output_list,
-                                                                    batch_title_output_list, batch_frame_output_list)):
+                                                                               batch_title_output_list,
+                                                                               batch_frame_output_list)):
             b1b2_logits = model.loose_similarity(query_output, visual_output)
             title_logits = model.loose_similarity(query_output, title_output)
             frame_logits = model.loose_similarity(query_output, frame_output)
@@ -487,7 +428,8 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_frame_output_splits.append(devc_batch_list)
 
             parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id],
-                        batch_title_output_splits[dev_id], batch_frame_output_splits[dev_id]) for dev_id in device_ids]
+                                      batch_title_output_splits[dev_id], batch_frame_output_splits[dev_id]) for dev_id
+                                     in device_ids]
             parallel_outputs_tuple = parallel_apply(_run_on_single_gpu, model, parameters_tuple_list, device_ids)
             sim_matrix = []
             sim_matrix_title = []
@@ -550,12 +492,9 @@ def main():
         tokenizer = ClipTokenizer()
 
     model = init_model(args, device, n_gpu, args.local_rank)
-    if args.dataset == "bird":
-        test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
-    elif args.dataset == "msrvtt":
-        test_dataloader, test_length = dataloader_msrvtt_test(args, tokenizer)
-    else:
-        raise NotImplementedError("wrong dataset")
+
+    assert args.dataset in DATALOADER_DICT
+    test_dataloader, test_length = DATALOADER_DICT[args.dataset]["test"](args, tokenizer)
     if args.local_rank == 0:
         logger.info("***** Running test *****")
         logger.info("  Num examples = %d", test_length)
@@ -563,7 +502,7 @@ def main():
         logger.info("  Num steps = %d", len(test_dataloader))
 
     if args.do_pretrain:
-        train_dataloader, train_length, train_sampler = dataloader_bird_pretrain(args, tokenizer)
+        train_dataloader, train_length, train_sampler = DATALOADER_DICT[args.dataset]["pretrain"](args, tokenizer)
         # train_dataloader, train_length, train_sampler = dataloader_msrvtt_pretrain(args, tokenizer)
         num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
                                         / args.gradient_accumulation_steps) * args.epochs
@@ -594,7 +533,7 @@ def main():
                     metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
                     if args.logdir:
                         args.writer.add_scalars('metrics', {'R1': metrics["R1"], 'R5': metrics["R5"],
-                                                           'R10': metrics["R10"]}, global_step=epoch)
+                                                            'R10': metrics["R10"]}, global_step=epoch)
         if args.local_rank == 0:
             save_model(epoch, args, model, type_name="")
     elif args.do_eval:

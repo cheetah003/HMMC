@@ -21,11 +21,10 @@ from modules.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from modules.tokenization_clip import SimpleTokenizer as ClipTokenizer
 from modules.modeling import BirdModel_VT, BirdPreTrainedModel, BirdModel
 from modules.optimization import BertAdam
+from dataloaders.dataloader import DATALOADER_DICT
 from modules.until_module import get_dual_matrix
-from torch.utils.data import DataLoader
 from util import parallel_apply, get_logger
-from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val
-from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader, MSRVTT_DataLoader
+
 
 try:
     # noinspection PyUnresolvedReferences
@@ -47,7 +46,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--use_frame_fea", action='store_true', help="whether use frame feature matching text")
     parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
-    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt"],
+    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt", "vatex"],
                         help="choose dataset.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
@@ -225,64 +224,6 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
             logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
     return optimizer, scheduler, model
 
-
-def dataloader_bird_train(args, tokenizer):
-    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
-                                        json_path=args.train_path, tokenizer=tokenizer, max_frames=args.max_frames,
-                                        frame_sample=args.frame_sample, frame_sample_len=args.frame_sample_len,
-                                        task=args.task)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
-    dataloader = DataLoader(
-        bird_trainset,
-        batch_size=args.batch_size // args.n_gpu,
-        num_workers=args.num_thread_reader,
-        pin_memory=True,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-    )
-    return dataloader, len(bird_trainset), train_sampler
-
-
-def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
-                                     json_path=args.val_path, tokenizer=tokenizer, max_frames=args.max_frames,
-                                     frame_sample_len=args.frame_sample_len, task=args.task)
-    dataloader = DataLoader(
-        bird_testset,
-        batch_size=args.batch_size_val,
-        num_workers=args.num_thread_reader,
-        shuffle=False,
-        drop_last=False,
-    )
-    return dataloader, len(bird_testset)
-
-
-def dataloader_msrvtt_train(args, tokenizer):
-    msrvtt_trainset = MSRVTT_TrainDataLoader(tokenizer=tokenizer, max_frames=args.max_frames)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(msrvtt_trainset)
-    dataloader = DataLoader(
-        msrvtt_trainset,
-        batch_size=args.batch_size // args.n_gpu,
-        num_workers=args.num_thread_reader,
-        pin_memory=True,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-    )
-    return dataloader, len(msrvtt_trainset), train_sampler
-
-
-def dataloader_msrvtt_test(args, tokenizer):
-    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, max_frames=args.max_frames,)
-    dataloader = DataLoader(
-        msrvtt_testset,
-        batch_size=args.batch_size_val,
-        num_workers=args.num_thread_reader,
-        shuffle=False,
-        drop_last=False,
-    )
-    return dataloader, len(msrvtt_testset)
 
 def save_model(epoch, args, model, type_name=""):
     # Only save the model it-self
@@ -587,13 +528,8 @@ def main():
                 # paramenters which < freeze_layer_num will be freezed
                 param.requires_grad = False
     '''
-
-    if args.dataset == "bird":
-        test_dataloader, test_length = dataloader_bird_test(args, tokenizer)
-    elif args.dataset == "msrvtt":
-        test_dataloader, test_length = dataloader_msrvtt_test(args, tokenizer)
-    else:
-        raise NotImplementedError("wrong dataset")
+    assert args.dataset in DATALOADER_DICT
+    test_dataloader, test_length = DATALOADER_DICT[args.dataset]["test"](args, tokenizer)
 
     if args.local_rank == 0:
         logger.info("***** Running test *****")
@@ -602,12 +538,7 @@ def main():
         logger.info("  Num steps = %d", len(test_dataloader))
 
     if args.do_train:
-        if args.dataset == "bird":
-            train_dataloader, train_length, train_sampler = dataloader_bird_train(args, tokenizer)
-        elif args.dataset == "msrvtt":
-            train_dataloader, train_length, train_sampler = dataloader_msrvtt_train(args, tokenizer)
-        else:
-            raise NotImplementedError("wrong dataset")
+        train_dataloader, train_length, train_sampler = DATALOADER_DICT[args.dataset]["train"](args, tokenizer)
 
         num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
                                         / args.gradient_accumulation_steps) * args.epochs

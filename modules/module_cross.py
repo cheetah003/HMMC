@@ -195,9 +195,9 @@ class VisualEncoder(nn.Module):
             video_mask = torch.zeros([video_frame, video_frame], device=visual_hidden.device)
             visual_hidden = self.temporal_transformer(visual_hidden, video_mask)
             # visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
-            visual_hidden = visual_hidden + visual_hidden_original
+            # visual_hidden = visual_hidden + visual_hidden_original
             # for clip zero shot
-            # visual_hidden = visual_hidden_original
+            visual_hidden = visual_hidden_original
             # [bs, frames,512] -> [bs, 1,512]
             # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
             visual_hidden = torch.mean(visual_hidden, dim=0)
