@@ -60,9 +60,9 @@ def get_flat_query_list(query_list):
         chCap_list = itm['chCap']
         for encap, chcap in zip(enCap_list, chCap_list):
             item = dict()
-            item["videoid"] = videoid
-            item["encap"] = encap
-            item["chcap"] = chcap
+            item["videoID"] = videoid
+            item["enCap"] = encap
+            item["chCap"] = chcap
             flat_query_list.append(item)
 
     return flat_query_list
@@ -190,13 +190,7 @@ class dataload_vatex_train(VisionDataset):
         video_data = np.stack(video_list)
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([frames, 3, self.resolution, self.resolution])
-        if self.frame_sample_len == "dynamic":
-            # dynamic frame needs pad
-            if frames < self.max_frames:
-                pad = np.zeros([self.max_frames - frames, 3, self.resolution, self.resolution],
-                               dtype=np.float32)
-                video_data = np.concatenate((video_data, pad), axis=0)
+        video_data = video_data.reshape([self.max_frames, 3, self.resolution, self.resolution])
 
         return video_data
 
@@ -249,7 +243,8 @@ class dataload_vatex_val(VisionDataset):
         else:
             self.tokenizer = tokenizer
         querylist = read_json_line(json_path)
-        self.datalist = get_flat_query_list(querylist)
+        self.datalist = querylist[0:1500]
+        # self.datalist = get_flat_query_list(querylist)
         # for fast debug
         # self.datalist = self.datalist[0:50000:10]
 
@@ -311,23 +306,8 @@ class dataload_vatex_val(VisionDataset):
         global g_lmdb_frames
         # global writer
         # random sample start ##################################################
-        if self.frame_sample == "uniform_random":
-            # assert g_lmdb_frames % frames == 0
-            video_index = list(np.arange(0, g_lmdb_frames))
-            # print("video_index:{}".format(video_index))
-            sample_slice = list()
-            k = g_lmdb_frames // frames
-            for i in np.arange(frames):
-                index = random.sample(video_index[k * i:k * (i + 1)], 1)
-                sample_slice.append(index[0])
-        elif self.frame_sample == "random":
-            # sample
-            video_index = list(np.arange(0, g_lmdb_frames))
-            sample_slice = random.sample(video_index, frames)
-            sample_slice = sorted(sample_slice)
-        else:
-            sample_slice = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
-            # random sample end ##################################################
+        sample_slice = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
+        # random sample end ##################################################
         for step, i in enumerate(sample_slice):
             video_key_new = video_key + "_%d" % i
             video_key_new = video_key_new.encode()
@@ -347,13 +327,7 @@ class dataload_vatex_val(VisionDataset):
         video_data = np.stack(video_list)
         video_data = video_data.copy()
         # video_data = video_data.astype('float64')
-        video_data = video_data.reshape([frames, 3, self.resolution, self.resolution])
-        if self.frame_sample_len == "dynamic":
-            # dynamic frame needs pad
-            if frames < self.max_frames:
-                pad = np.zeros([self.max_frames - frames, 3, self.resolution, self.resolution],
-                               dtype=np.float32)
-                video_data = np.concatenate((video_data, pad), axis=0)
+        video_data = video_data.reshape([self.max_frames, 3, self.resolution, self.resolution])
 
         return video_data
 
@@ -371,15 +345,16 @@ class dataload_vatex_val(VisionDataset):
         videoid = item["videoID"]
         video_data = self._get_video(videoid, self.max_frames)
         if self.language == "chinese":
-            cap = item['enCap']
+            cap = item['chCap'][0]
         elif self.language == "english":
-            cap = item['chCap']
+            cap = item['enCap'][0]
         else:
             raise NotImplementedError("bilingual:not implemented!")
-
+        if index % 64 == 0:
+            print("idx:{},videoid:{},cap:{}".format(index, videoid, cap))
         cap_ids, cap_mask, _ = self._get_text(cap, self.caption_max_words)
 
-        return cap_ids, cap_mask, video_data, self.max_frames, index
+        return cap_ids, cap_mask, video_data, self.max_frames
 
     def __len__(self) -> int:
         return self._length

@@ -24,13 +24,7 @@ from modules.optimization import BertAdam
 from dataloaders.dataloader import DATALOADER_DICT
 from modules.until_module import get_dual_matrix
 from util import parallel_apply, get_logger
-
-
-try:
-    # noinspection PyUnresolvedReferences
-    from apex import amp
-except ImportError:
-    amp = None
+from torch.cuda.amp import autocast, GradScaler
 
 torch.distributed.init_process_group(backend="nccl")
 
@@ -66,10 +60,6 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help='use dynamic frame length of fix frame length')
     parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english"],
                         help='language for text encoder')
-    parser.add_argument('--train_path', type=str, default="/ai/swxdisk/data/bird/query_data_train_bilingual.json",
-                        help='train data path')
-    parser.add_argument('--val_path', type=str, default="/ai/swxdisk/data/bird/query_data_val_bilingual.json",
-                        help='val data path')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -85,9 +75,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--cache_dir", default="", type=str,
                         help="Where do you want to store the pre-trained models downloaded from s3")
 
-    parser.add_argument('--fp16_opt_level', type=str, default='O1',
-                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-                             "See details at https://nvidia.github.io/apex/amp.html")
+    parser.add_argument('--enable_amp', action='store_true', help="whether to use pytorch amp")
 
     parser.add_argument("--world_size", default=0, type=int, help="distribted training")
     parser.add_argument("--local_rank", default=0, type=int, help="distribted training")
@@ -214,8 +202,6 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                          schedule='warmup_cosine', b1=0.9, b2=0.98, e=1e-6,
                          t_total=num_train_optimization_steps, weight_decay=weight_decay,
                          max_grad_norm=1.0)
-    if args.fp16_opt_level != "O0":
-        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
@@ -260,7 +246,7 @@ def load_model(epoch, args, n_gpu, device, model_file=None):
     return model
 
 
-def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, scheduler, global_step, local_rank=0):
+def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, scheduler, scaler, global_step, local_rank=0):
     global logger
     torch.cuda.empty_cache()
     model.train()
@@ -277,23 +263,22 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
 
-        if args.task == "retrieval_VT":
-            query_ids, query_mask, video_data, video_frame, title_ids, title_mask, idx = batch
-            loss = model(query_ids, query_mask, video_data, video_frame, title_ids, title_mask, idx, global_step)
-        elif args.task == "retrieval":
-            query_ids, query_mask, video_data, video_frame, idx = batch
-            loss = model(query_ids, query_mask, video_data, video_frame, idx, global_step)
-        else:
-            raise ValueError("wrong task type:{}".format(args.task))
+        with autocast(enabled=args.enable_amp):
+            if args.task == "retrieval_VT":
+                query_ids, query_mask, video_data, video_frame, title_ids, title_mask, idx = batch
+                loss = model(query_ids, query_mask, video_data, video_frame, title_ids, title_mask, idx, global_step)
+            elif args.task == "retrieval":
+                query_ids, query_mask, video_data, video_frame, idx = batch
+                loss = model(query_ids, query_mask, video_data, video_frame, idx, global_step)
+            else:
+                raise ValueError("wrong task type:{}".format(args.task))
+            if n_gpu > 1:
+                loss = loss.mean()  # mean() to average on multi-gpu.
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
 
-        if n_gpu > 1:
-            loss = loss.mean()  # mean() to average on multi-gpu.
-        if args.gradient_accumulation_steps > 1:
-            loss = loss / args.gradient_accumulation_steps
-        if args.fp16_opt_level != "O0":
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-                loss = scaled_loss
+        if args.enable_amp:
+            scaler.scale(loss).backward()
         else:
             loss.backward()
         total_loss += float(loss)
@@ -302,15 +287,17 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
-            if args.fp16_opt_level != "O0":
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
-            else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             if scheduler is not None:
                 scheduler.step()  # Update learning rate schedule
 
-            optimizer.step()
+            if args.enable_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
             optimizer.zero_grad()
 
             if global_step % log_step == 0 and local_rank == 0:
@@ -557,10 +544,14 @@ def main():
         best_score = 0.00001
         best_output_model_file = "None"
         global_step = 0
+        if args.enable_amp:
+            scaler = GradScaler()
+        else:
+            scaler = None
         for epoch in range(args.epochs):
             train_sampler.set_epoch(epoch)
             tr_loss, global_step = train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer,
-                                               scheduler, global_step, local_rank=args.local_rank)
+                                               scheduler, scaler, global_step, local_rank=args.local_rank)
             if args.local_rank == 0:
                 logger.info("Epoch %d/%s Finished, Train Loss: %f", epoch + 1, args.epochs, tr_loss)
                 # for name, param in model.named_parameters():

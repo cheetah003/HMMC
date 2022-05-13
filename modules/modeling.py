@@ -476,7 +476,7 @@ class BirdModel(BirdPreTrainedModel):
             if self.rank == 0:
                 logger.info(
                     "loss:{},frame_loss:{},sim_loss:{},type:{},sim_matrix.shape:{}".format(loss, loss - sim_loss,
-                                                                                           sim_loss, sim_loss.dtype, sim_matrix.shape))
+                                                                            sim_loss, sim_loss.dtype, sim_matrix.shape))
 
                 if self.task_config.logdir:
                     self.task_config.writer.add_scalar('loss', float(loss), global_step=global_step)

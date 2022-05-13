@@ -8,7 +8,8 @@ from dataloaders.dataloader_vatex_retrieval import dataload_vatex_train, dataloa
 
 def dataloader_bird_pretrain(args, tokenizer):
     bird_dataset = dataload_bird_pretrain(root='/ai/swxdisk/data/bird/videoinfo_lmdb', language=args.language,
-                                          json_path=args.pretrain_path, tokenizer=tokenizer, max_frames=args.max_frames,
+                                          json_path="/ai/swxdisk/data/bird/videoinfo_bilingual.json",
+                                          tokenizer=tokenizer, max_frames=args.max_frames,
                                           frame_sample=args.frame_sample, frame_sample_len=args.frame_sample_len)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_dataset)
     dataloader = DataLoader(
@@ -24,8 +25,9 @@ def dataloader_bird_pretrain(args, tokenizer):
 
 
 def dataloader_bird_train(args, tokenizer):
-    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
-                                        json_path=args.train_path, tokenizer=tokenizer, max_frames=args.max_frames,
+    bird_trainset = dataload_bird_train(root='/ai/swxdisk/data/bird/query_lmdb', language=args.language,
+                                        json_path="/ai/swxdisk/data/bird/query_data_train_bilingual.json",
+                                        tokenizer=tokenizer, max_frames=args.max_frames,
                                         frame_sample=args.frame_sample, frame_sample_len=args.frame_sample_len,
                                         task=args.task)
     train_sampler = torch.utils.data.distributed.DistributedSampler(bird_trainset)
@@ -42,8 +44,8 @@ def dataloader_bird_train(args, tokenizer):
 
 
 def dataloader_bird_test(args, tokenizer):
-    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb',language=args.language,
-                                     json_path=args.val_path, tokenizer=tokenizer, max_frames=args.max_frames,
+    bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb', language=args.language,
+                                     json_path="/ai/swxdisk/data/bird/query_data_val_bilingual.json", tokenizer=tokenizer, max_frames=args.max_frames,
                                      frame_sample_len=args.frame_sample_len, task=args.task)
     dataloader = DataLoader(
         bird_testset,
@@ -56,7 +58,10 @@ def dataloader_bird_test(args, tokenizer):
 
 
 def dataloader_msrvtt_pretrain(args, tokenizer):
-    msrvtt_trainset = MSRVTT_prerainDataLoader(tokenizer=tokenizer, max_frames=args.max_frames)
+    msrvtt_trainset = MSRVTT_prerainDataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
+                                               csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_train.9k.csv",
+                                               json_path="/ai/swxdisk/data/msrvtt/MSRVTT_data.json",
+                                               max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(msrvtt_trainset)
     dataloader = DataLoader(
         msrvtt_trainset,
@@ -71,7 +76,10 @@ def dataloader_msrvtt_pretrain(args, tokenizer):
 
 
 def dataloader_msrvtt_train(args, tokenizer):
-    msrvtt_trainset = MSRVTT_TrainDataLoader(tokenizer=tokenizer, max_frames=args.max_frames)
+    msrvtt_trainset = MSRVTT_TrainDataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
+                                             csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_train.9k.csv",
+                                             json_path="/ai/swxdisk/data/msrvtt/MSRVTT_data.json",
+                                             frame_sample=args.frame_sample, max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(msrvtt_trainset)
     dataloader = DataLoader(
         msrvtt_trainset,
@@ -86,7 +94,9 @@ def dataloader_msrvtt_train(args, tokenizer):
 
 
 def dataloader_msrvtt_test(args, tokenizer):
-    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, max_frames=args.max_frames)
+    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
+                                       csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_JSFUSION_test.csv",
+                                       max_frames=args.max_frames)
     dataloader = DataLoader(
         msrvtt_testset,
         batch_size=args.batch_size_val,
@@ -98,7 +108,9 @@ def dataloader_msrvtt_test(args, tokenizer):
 
 
 def dataloader_vatex_train(args, tokenizer):
-    vatex_trainset = dataload_vatex_train(tokenizer=tokenizer, max_frames=args.max_frames)
+    vatex_trainset = dataload_vatex_train(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
+                                          json_path='/ai/swxdisk/data/vatex/vatex_train.json', tokenizer=tokenizer,
+                                          max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(vatex_trainset)
     dataloader = DataLoader(
         vatex_trainset,
@@ -113,7 +125,8 @@ def dataloader_vatex_train(args, tokenizer):
 
 
 def dataloader_vatex_test(args, tokenizer):
-    vatex_testset = dataload_vatex_val(tokenizer=tokenizer, max_frames=args.max_frames)
+    vatex_testset = dataload_vatex_val(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
+                                          json_path='/ai/swxdisk/data/vatex/vatex_val.json', tokenizer=tokenizer, max_frames=args.max_frames)
     dataloader = DataLoader(
         vatex_testset,
         batch_size=args.batch_size_val,

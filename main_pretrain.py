@@ -67,10 +67,6 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--contrast_temperature', type=float, default=0.07, help='temperature')
     parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english"],
                         help='language for text encoder')
-    parser.add_argument('--pretrain_path', type=str, default="/ai/swxdisk/data/bird/videoinfo_bilingual.json",
-                        help='pretrain data path')
-    parser.add_argument('--val_path', type=str, default="/ai/swxdisk/data/bird/query_data_val_bilingual.json",
-                        help='val data path')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,

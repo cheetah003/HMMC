@@ -39,7 +39,8 @@ class MSRVTT_DataLoader(VisionDataset):
     def __init__(
             self,
             tokenizer,
-            csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_JSFUSION_test.csv",
+            root,
+            csv_path,
             features_path=None,
             max_words=32,
             feature_framerate=1.0,
@@ -52,7 +53,7 @@ class MSRVTT_DataLoader(VisionDataset):
         # env and txn is delay-loaded in ddp. They can't pickle
         self._env = None
         self._txn = None
-        self.root = "/ai/swxdisk/data/msrvtt/msrvtt_lmdb"
+        self.root = root
         self.data = pd.read_csv(csv_path)
         self.features_path = features_path
         self.feature_framerate = feature_framerate
@@ -162,13 +163,14 @@ class MSRVTT_TrainDataLoader(VisionDataset):
     def __init__(
             self,
             tokenizer,
-            csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_train.9k.csv",
-            json_path="/ai/swxdisk/data/msrvtt/MSRVTT_data.json",
-            root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
+            root,
+            csv_path,
+            json_path,
             max_words=32,
             max_frames=12,
             unfold_sentences=True,
             image_resolution=224,
+            frame_sample=None,
             frame_order=0,
             slice_framepos=0,
     ):
@@ -182,6 +184,7 @@ class MSRVTT_TrainDataLoader(VisionDataset):
         self.max_words = max_words
         self.max_frames = max_frames
         self.resolution = image_resolution
+        self.frame_sample = frame_sample
         self.tokenizer = tokenizer
         # 0: ordinary order; 1: reverse order; 2: random order.
         self.frame_order = frame_order
@@ -277,15 +280,28 @@ class MSRVTT_TrainDataLoader(VisionDataset):
         words = self.tokenizer.tokenize(caption)
         return words
 
-    def _get_rawvideo(self, choice_video_ids):
+    def _get_rawvideo(self, choice_video_ids, frames):
         video_mask = np.ones((len(choice_video_ids), self.max_frames), dtype=np.long)
         video_list = list()
         global g_lmdb_frames
         video_id = choice_video_ids[0]
         # uniform sample start ##################################################
-        video_index = list(np.arange(0, g_lmdb_frames))
-        sample_slice = random.sample(video_index, self.max_frames)
-        sample_slice = sorted(sample_slice)
+        if self.frame_sample == "uniform_random":
+            # assert g_lmdb_frames % frames == 0
+            video_index = list(np.arange(0, g_lmdb_frames))
+            # print("video_index:{}".format(video_index))
+            sample_slice = list()
+            k = g_lmdb_frames // frames
+            for i in np.arange(frames):
+                index = random.sample(video_index[k * i:k * (i + 1)], 1)
+                sample_slice.append(index[0])
+        elif self.frame_sample == "random":
+            # sample
+            video_index = list(np.arange(0, g_lmdb_frames))
+            sample_slice = random.sample(video_index, frames)
+            sample_slice = sorted(sample_slice)
+        else:
+            sample_slice = np.linspace(0, g_lmdb_frames, frames, endpoint=False, dtype=int)
         # uniform sample end ##################################################
         for i in sample_slice:
             video_key_new = video_id + "_%d" % i
@@ -301,7 +317,7 @@ class MSRVTT_TrainDataLoader(VisionDataset):
             video_list.append(frame_data)
         video_data = np.stack(video_list)
         video_data = video_data.copy()
-        video_data = video_data.reshape([self.max_frames, 3, self.resolution, self.resolution])
+        video_data = video_data.reshape([frames, 3, self.resolution, self.resolution])
 
         return video_data, video_mask
 
@@ -313,7 +329,7 @@ class MSRVTT_TrainDataLoader(VisionDataset):
         else:
             video_id, caption = self.csv['video_id'].values[idx], None
         pairs_text, pairs_mask, pairs_segment, choice_video_ids = self._get_text(video_id, caption)
-        video, video_mask = self._get_rawvideo(choice_video_ids)
+        video, video_mask = self._get_rawvideo(choice_video_ids, self.max_frames)
         return pairs_text, pairs_mask, video, self.max_frames, idx
 
 
@@ -323,9 +339,9 @@ class MSRVTT_prerainDataLoader(VisionDataset):
     def __init__(
             self,
             tokenizer,
-            csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_train.9k.csv",
-            json_path="/ai/swxdisk/data/msrvtt/MSRVTT_data.json",
-            root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
+            root,
+            csv_path,
+            json_path,
             max_words=32,
             max_frames=12,
             unfold_sentences=True,
