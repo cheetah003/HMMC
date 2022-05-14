@@ -100,14 +100,20 @@ class dataload_vatex_train(VisionDataset):
         else:
             self.SPECIAL_TOKEN = {"CLS_TOKEN": "<|startoftext|>", "SEP_TOKEN": "<|endoftext|>",
                                   "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
+        # self.transform = transforms.Compose([
+        #     transforms.RandomResizedCrop(224, scale=(0.5, 1.)),  # 0.08-1
+        #     transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+        #     transforms.RandomGrayscale(p=0.2),
+        #     transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+        #     transforms.RandomHorizontalFlip(),
+        #     transforms.ToTensor(),
+        #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        # ])
         self.transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.5, 1.)),  # 0.08-1
-            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
-            transforms.RandomHorizontalFlip(),
+            transforms.Resize(self.resolution, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(self.resolution),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
         ])
 
     def __enter__(self):
@@ -350,8 +356,8 @@ class dataload_vatex_val(VisionDataset):
             cap = item['enCap'][0]
         else:
             raise NotImplementedError("bilingual:not implemented!")
-        if index % 64 == 0:
-            print("idx:{},videoid:{},cap:{}".format(index, videoid, cap))
+        # if index % 64 == 0:
+        #     print("idx:{},videoid:{},cap:{}".format(index, videoid, cap))
         cap_ids, cap_mask, _ = self._get_text(cap, self.caption_max_words)
 
         return cap_ids, cap_mask, video_data, self.max_frames

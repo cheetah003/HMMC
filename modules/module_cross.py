@@ -150,13 +150,14 @@ class Transformer(nn.Module):
 
 
 class VisualEncoder(nn.Module):
-    def __init__(self, local_rank, cross_config):
+    def __init__(self, task_config, cross_config):
         super().__init__()
         pretrained_clip_name = cross_config.pretrained_clip_name
-        if local_rank == 0:
+        if task_config.local_rank == 0:
             logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
         clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
-        clip = build_model(clip_state_dict, local_rank=local_rank)
+        clip = build_model(clip_state_dict, local_rank=task_config.local_rank)
+        self.use_temp = task_config.use_temp
         self.is_vit = copy.deepcopy(clip.vit)
         self.visual = copy.deepcopy(clip.visual)
         self.temporal_transformer = Transformer(width=cross_config.temporal_hidden_size,
@@ -167,7 +168,7 @@ class VisualEncoder(nn.Module):
 
     def forward(self, video, video_frames):
         # encode frames
-        bs = video.size(0)
+        bs, _, channel, h, w = video.shape
         visual_hidden_list = []
         frame_hidden_list = []
         for b in range(bs):
@@ -184,34 +185,41 @@ class VisualEncoder(nn.Module):
             # get temporal information
             visual_hidden_original = visual_hidden
             frame_hidden_list.append(visual_hidden_original)
-            seq_length = visual_hidden.size(0)
-            position_ids = torch.arange(seq_length, dtype=torch.long, device=visual_hidden.device)
-            # logger.info("position_ids.shape:{}".format(position_ids.shape))
-            frame_position_embeddings = self.frame_position_embeddings(position_ids)
-            # logger.info("frame_position_embeddings.shape:{}".format(frame_position_embeddings.shape))
-            visual_hidden = visual_hidden + frame_position_embeddings
+            if self.use_temp:
+                seq_length = visual_hidden.size(0)
+                position_ids = torch.arange(seq_length, dtype=torch.long, device=visual_hidden.device)
+                # logger.info("position_ids.shape:{}".format(position_ids.shape))
+                frame_position_embeddings = self.frame_position_embeddings(position_ids)
+                # logger.info("frame_position_embeddings.shape:{}".format(frame_position_embeddings.shape))
+                visual_hidden = visual_hidden + frame_position_embeddings
 
-            # visual_hidden = visual_hidden.permute(1, 0, 2)  # NLD -> LND
-            video_mask = torch.zeros([video_frame, video_frame], device=visual_hidden.device)
-            visual_hidden = self.temporal_transformer(visual_hidden, video_mask)
-            # visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
-            # visual_hidden = visual_hidden + visual_hidden_original
-            # for clip zero shot
-            visual_hidden = visual_hidden_original
+                # visual_hidden = visual_hidden.permute(1, 0, 2)  # NLD -> LND
+                video_mask = torch.zeros([video_frame, video_frame], device=visual_hidden.device)
+                visual_hidden = self.temporal_transformer(visual_hidden, video_mask)
+                # visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
+                visual_hidden = visual_hidden + visual_hidden_original
+
             # [bs, frames,512] -> [bs, 1,512]
             # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
+            visual_hidden = visual_hidden / visual_hidden.norm(dim=-1, keepdim=True)
             visual_hidden = torch.mean(visual_hidden, dim=0)
             # logger.info("visual_hidden mean.shape:{}".format(visual_hidden.shape))
             visual_hidden_list.append(visual_hidden)
         visual_output = torch.stack(visual_hidden_list, dim=0)
         frame_output = torch.stack(frame_hidden_list, dim=0)
+
         # logger.info("visual encoder visual_output.shape:{}".format(visual_output.shape))
         return visual_output, frame_output
+
+    @property
+    def dtype(self):
+        return self.visual.conv1.weight.dtype
 
     def encode_image(self, image, return_hidden=False, video_frame=-1):
         if self.is_vit:
             # logger.info("image.shape:{}".format(image.shape))
-            hidden = self.visual(image, video_frame=video_frame)
+            # hidden = self.visual(image, video_frame=video_frame)
+            hidden = self.visual(image.type(self.dtype), video_frame=video_frame)
             # logger.info("hidden1.shape:{}".format(hidden.shape))
             hidden = self.visual.ln_post(hidden) @ self.visual.proj
             # logger.info("hidden2.shape:{}".format(hidden.shape))

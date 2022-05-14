@@ -60,6 +60,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help='use dynamic frame length of fix frame length')
     parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english"],
                         help='language for text encoder')
+    parser.add_argument('--use_temp', action='store_true', help='whether to use temporal transformer')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -256,7 +257,7 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     load_start_time = time.time()
     for step, batch in enumerate(train_dataloader):
         load_finish_time = time.time()
-        if args.local_rank == 0:
+        if global_step % log_step == 0 and local_rank == 0:
             logger.info("data loader time:{}".format(load_finish_time - load_start_time))
         global_step += 1
         if n_gpu == 1:
@@ -283,7 +284,7 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             loss.backward()
         total_loss += float(loss)
         forward_and_backward_time = time.time()
-        if args.local_rank == 0:
+        if global_step % log_step == 0 and local_rank == 0:
             logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -377,8 +378,15 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
 
             logger.info("eval video.shape:{}".format(video.shape))
+            logger.info("eval video:{}".format(video[0]))
+            logger.info("eval query_ids.shape:{}".format(query_ids.shape))
+            logger.info("eval query_ids:{}".format(query_ids))
             query_output = model.text_encoder(query_ids, query_mask)
+            logger.info("eval query_output.shape:{},dtype:{}".format(query_output.shape, query_output.dtype))
+            logger.info("eval query_output:{}".format(query_output))
             visual_output, frame_output = model.visual_encoder(video, video_frame)
+            logger.info("eval frame_output.shape:{}".format(frame_output.shape))
+            logger.info("eval frame_output:{}".format(frame_output))
             frame_output = torch.mean(frame_output, dim=1)
             if args.task == "retrieval_VT":
                 title_output = model.text_encoder(title_ids, title_mask)
@@ -451,7 +459,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
             sim_matrix_frame = np.concatenate(tuple(sim_matrix_frame), axis=0)
 
-        logger.info("sim_matrix:{}".format(sim_matrix))
+        # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
             logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
             sim_matrix = sim_matrix + sim_matrix_frame

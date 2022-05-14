@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def compute_metrics(x):
-    logger.info("sx:{}".format(np.argmax(x, axis=1)))
+    # logger.info("sx:{}".format(np.argmax(x, axis=1)))
     sx = np.sort(-x, axis=1)
     d = np.diag(-x)
     d = d[:, np.newaxis]

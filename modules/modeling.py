@@ -95,7 +95,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.weight_v = cross_config.weight_sum_v
         self.weight_t = cross_config.weight_sum_t
         self.weight_cross = cross_config.weight_sum_cross
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([4.60517], dtype=torch.float32), requires_grad=True)
         self.contrast_momentum = task_config.contrast_momentum
         self.contrast_temperature = task_config.contrast_temperature
         self.contrast_num_negative = task_config.contrast_num_negative
@@ -121,8 +121,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         t_config.vocab_size = self.tokenizer.vocab_size
         self.cls = BertLMPredictionHead(t_config)
         ################## visual_encoder
-        self.visual_encoder = VisualEncoder(self.rank, cross_config)
-        self.visual_encoder_k = VisualEncoder(self.rank, cross_config)
+        self.visual_encoder = VisualEncoder(self.task_config, cross_config)
+        self.visual_encoder_k = VisualEncoder(self.task_config, cross_config)
         self.v_projector = MLP(num_layers=cross_config.proj_num_layers)
         self.v_projector_k = MLP(num_layers=cross_config.proj_num_layers)
         self.v_predictor = MLP(num_layers=cross_config.pred_num_layers)
@@ -420,11 +420,11 @@ class BirdModel(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([4.60517], dtype=torch.float32), requires_grad=True)
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
-        self.visual_encoder = VisualEncoder(self.rank, cross_config)
+        self.visual_encoder = VisualEncoder(self.task_config, cross_config)
         ################## loss function
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
@@ -448,16 +448,16 @@ class BirdModel(BirdPreTrainedModel):
         query_mask = query_mask.view(-1, query_mask.shape[-1])
         # T x 3 x H x W
         video = torch.as_tensor(video_data)
-        if self.rank == 0:
-            logger.info("video.shape:{}, dtype:{}".format(video.shape, video.dtype))
+        # if self.rank == 0:
+        #     logger.info("video.shape:{}, dtype:{}".format(video.shape, video.dtype))
         if self.training:
             loss = 0.0
             query_output = self.text_encoder(query_ids, query_mask)
             visual_output, frame_output = self.visual_encoder(video, video_frame)
-            if self.rank == 0:
-                logger.info("query_output.shape:{},dtype:{}".format(query_output.shape, query_output.dtype))
-                logger.info("visual_output.shape:{},dtype:{}".format(visual_output.shape, visual_output.dtype))
-                logger.info("frame_output.shape:{},dtype:{}".format(frame_output.shape, frame_output.dtype))
+            # if self.rank == 0:
+            #     logger.info("query_output.shape:{},dtype:{}".format(query_output.shape, query_output.dtype))
+            #     logger.info("visual_output.shape:{},dtype:{}".format(visual_output.shape, visual_output.dtype))
+            #     logger.info("frame_output.shape:{},dtype:{}".format(frame_output.shape, frame_output.dtype))
 
             visual_output = dist_collect(visual_output).squeeze(1)
             query_output = dist_collect(query_output).squeeze(1)
@@ -473,10 +473,11 @@ class BirdModel(BirdPreTrainedModel):
                 frame_loss = self.frame_loss(query_output, frame_output)
                 loss += frame_loss
 
-            if self.rank == 0:
-                logger.info(
-                    "loss:{},frame_loss:{},sim_loss:{},type:{},sim_matrix.shape:{}".format(loss, loss - sim_loss,
-                                                                            sim_loss, sim_loss.dtype, sim_matrix.shape))
+            if self.task_config.local_rank == 0:
+                if global_step % self.task_config.n_display == 0:
+                    logger.info(
+                        "loss:{},frame_loss:{},sim_loss:{},type:{},sim_matrix.shape:{}".format(loss, loss - sim_loss,
+                                                                                sim_loss, sim_loss.dtype, sim_matrix.shape))
 
                 if self.task_config.logdir:
                     self.task_config.writer.add_scalar('loss', float(loss), global_step=global_step)
@@ -491,11 +492,11 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([np.log(1 / 0.07)], dtype=torch.float32), requires_grad=True)
+        self.logit_scale = torch.nn.Parameter(torch.tensor([4.60517], dtype=torch.float32), requires_grad=True)
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
-        self.visual_encoder = VisualEncoder(self.rank, cross_config)
+        self.visual_encoder = VisualEncoder(self.task_config, cross_config)
 
         ################## loss function
         self.loss_fct = CrossEn()
@@ -526,8 +527,9 @@ class BirdModel_VT(BirdPreTrainedModel):
             sim_loss_title = self.loss_fct(sim_matrix_title) + self.loss_fct(sim_matrix_title.T)
             loss += sim_loss_title
 
-            if self.rank == 0:
-                logger.info("sim_loss:{},sim_loss_title:{}".format(sim_loss, sim_loss_title))
+            if self.task_config.local_rank == 0:
+                if global_step % self.task_config.n_display == 0:
+                    logger.info("sim_loss:{},sim_loss_title:{}".format(sim_loss, sim_loss_title))
                 if self.task_config.logdir:
                     loss_item = {"loss": float(loss), "sim_loss": float(sim_loss),
                                  "sim_loss_title": float(sim_loss_title)}
