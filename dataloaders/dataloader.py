@@ -126,7 +126,9 @@ def dataloader_vatex_train(args, tokenizer):
 
 def dataloader_vatex_test(args, tokenizer):
     vatex_testset = dataload_vatex_val(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
-                                          json_path='/ai/swxdisk/data/vatex/vatex_val.json', tokenizer=tokenizer, max_frames=args.max_frames)
+                                          # json_path='/ai/swxdisk/data/vatex/vatex_val.json',
+                                       json_path='/ai/swxdisk/data/vatex/vatex_test_HGR.json',
+                                       tokenizer=tokenizer, max_frames=args.max_frames)
     dataloader = DataLoader(
         vatex_testset,
         batch_size=args.batch_size_val,

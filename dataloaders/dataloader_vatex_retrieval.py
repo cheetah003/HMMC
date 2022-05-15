@@ -249,8 +249,16 @@ class dataload_vatex_val(VisionDataset):
         else:
             self.tokenizer = tokenizer
         querylist = read_json_line(json_path)
-        self.datalist = querylist[0:1500]
-        # self.datalist = get_flat_query_list(querylist)
+        # querylist = querylist[0:1500]
+        self.datalist = get_flat_query_list(querylist)
+
+        # for multi-sentence retrieval
+        self.multi_sentence_per_video = True  # important tag for eval in multi-sentence retrieval
+        self.video_num = len(querylist)
+        self.sentence_num = len(self.datalist)
+        self.cut_off_points = list(np.arange(10, 10*self.video_num+1, 10))
+        assert len(self.cut_off_points) == self.video_num
+
         # for fast debug
         # self.datalist = self.datalist[0:50000:10]
 
