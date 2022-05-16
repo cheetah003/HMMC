@@ -404,7 +404,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                 filter_inds = [itm - s_ for itm in cut_off_points_ if s_ <= itm < e_]
 
                 if len(filter_inds) > 0:
-                    video, video_mask = video[filter_inds, ...], video_mask[filter_inds, ...]
+                    video = video[filter_inds, ...]
                     visual_output, frame_output = model.visual_encoder(video, video_frame)
                     frame_output = torch.mean(frame_output, dim=1)
                     batch_visual_output_list.append(visual_output)
