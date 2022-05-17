@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 
 from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val
 from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_prerainDataLoader, MSRVTT_TrainDataLoader, MSRVTT_DataLoader
-from dataloaders.dataloader_vatex_retrieval import dataload_vatex_train, dataload_vatex_val
+from dataloaders.dataloader_vatex_retrieval import VATEX_multi_sentence_dataLoader
 
 
 def dataloader_bird_pretrain(args, tokenizer):
@@ -108,7 +108,7 @@ def dataloader_msrvtt_test(args, tokenizer):
 
 
 def dataloader_vatex_train(args, tokenizer):
-    vatex_trainset = dataload_vatex_train(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
+    vatex_trainset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
                                           json_path='/ai/swxdisk/data/vatex/vatex_train.json', tokenizer=tokenizer,
                                           max_frames=args.max_frames)
     train_sampler = torch.utils.data.distributed.DistributedSampler(vatex_trainset)
@@ -125,9 +125,9 @@ def dataloader_vatex_train(args, tokenizer):
 
 
 def dataloader_vatex_test(args, tokenizer):
-    vatex_testset = dataload_vatex_val(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
-                                          # json_path='/ai/swxdisk/data/vatex/vatex_val.json',
-                                       json_path='/ai/swxdisk/data/vatex/vatex_test_HGR.json',
+    vatex_testset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
+                                       subset="test", frame_sample=args.frame_sample,
+                                       json_path='/ai/swxdisk/data/vatex',
                                        tokenizer=tokenizer, max_frames=args.max_frames)
     dataloader = DataLoader(
         vatex_testset,
