@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val
-from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_prerainDataLoader, MSRVTT_TrainDataLoader, MSRVTT_DataLoader
+from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader, MSRVTT_DataLoader
 from dataloaders.dataloader_vatex_retrieval import VATEX_multi_sentence_dataLoader
 
 
@@ -55,24 +55,6 @@ def dataloader_bird_test(args, tokenizer):
         drop_last=False,
     )
     return dataloader, len(bird_testset)
-
-
-def dataloader_msrvtt_pretrain(args, tokenizer):
-    msrvtt_trainset = MSRVTT_prerainDataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
-                                               csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_train.9k.csv",
-                                               json_path="/ai/swxdisk/data/msrvtt/MSRVTT_data.json",
-                                               max_frames=args.max_frames)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(msrvtt_trainset)
-    dataloader = DataLoader(
-        msrvtt_trainset,
-        batch_size=args.batch_size // args.n_gpu,
-        num_workers=args.num_thread_reader,
-        pin_memory=True,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-    )
-    return dataloader, len(msrvtt_trainset), train_sampler
 
 
 def dataloader_msrvtt_train(args, tokenizer):
@@ -142,6 +124,5 @@ def dataloader_vatex_test(args, tokenizer):
 DATALOADER_DICT = {}
 DATALOADER_DICT["bird"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_msrvtt_train,
                            "test": dataloader_msrvtt_test}
-DATALOADER_DICT["msrvtt"] = {"pretrain": dataloader_msrvtt_pretrain, "train": dataloader_msrvtt_train,
-                             "test": dataloader_msrvtt_test}
+DATALOADER_DICT["msrvtt"] = {"train": dataloader_msrvtt_train, "test": dataloader_msrvtt_test}
 DATALOADER_DICT["vatex"] = {"train": dataloader_vatex_train, "test": dataloader_vatex_test}

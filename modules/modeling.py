@@ -95,7 +95,6 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.weight_v = cross_config.weight_sum_v
         self.weight_t = cross_config.weight_sum_t
         self.weight_cross = cross_config.weight_sum_cross
-        self.logit_scale = torch.nn.Parameter(torch.tensor([4.60517], dtype=torch.float32), requires_grad=True)
         self.contrast_momentum = task_config.contrast_momentum
         self.contrast_temperature = task_config.contrast_temperature
         self.contrast_num_negative = task_config.contrast_num_negative
@@ -214,7 +213,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         sequence_output = sequence_output.squeeze()
         sequence_output = sequence_output / sequence_output.norm(dim=-1, keepdim=True)
 
-        logit_scale = self.logit_scale.exp()
+        logit_scale = self.visual_encoder.logit_scale.exp()
         logit_scale.data = torch.clamp(logit_scale.data, max=100)
         # if self.rank == 0:
         #     logger.info("logit_scale:{},dtype:{}".format(logit_scale, logit_scale.dtype))
@@ -419,8 +418,7 @@ class BirdModel(BirdPreTrainedModel):
         super(BirdPreTrainedModel, self).__init__(cross_config)
         self.task_config = task_config
         self.rank = task_config.local_rank
-        self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([4.60517], dtype=torch.float32), requires_grad=True)
+        # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
@@ -491,8 +489,7 @@ class BirdModel_VT(BirdPreTrainedModel):
         super(BirdPreTrainedModel, self).__init__(cross_config)
         self.task_config = task_config
         self.rank = task_config.local_rank
-        self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
-        self.logit_scale = torch.nn.Parameter(torch.tensor([4.60517], dtype=torch.float32), requires_grad=True)
+        # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder

@@ -158,12 +158,14 @@ class VisualEncoder(nn.Module):
         clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
         clip = build_model(clip_state_dict, local_rank=task_config.local_rank)
         self.use_temp = task_config.use_temp
+        self.logit_scale = copy.deepcopy(clip.logit_scale)
         self.is_vit = copy.deepcopy(clip.vit)
         self.visual = copy.deepcopy(clip.visual)
-        self.temporal_transformer = Transformer(width=cross_config.temporal_hidden_size,
-                                          layers=cross_config.temporal_hidden_layers,
-                                          heads=cross_config.temporal_attention_heads)
-        self.frame_position_embeddings = nn.Embedding(cross_config.max_position_embeddings,
+        if self.use_temp:
+            self.temporal_transformer = Transformer(width=cross_config.temporal_hidden_size,
+                                              layers=cross_config.temporal_hidden_layers,
+                                              heads=cross_config.temporal_attention_heads)
+            self.frame_position_embeddings = nn.Embedding(cross_config.max_position_embeddings,
                                                       cross_config.temporal_hidden_size)
 
     def forward(self, video, video_frames):

@@ -67,7 +67,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--cross_model", default="cross-base", type=str, required=False, help="Cross module")
     parser.add_argument("--init_model", default=None, type=str, required=False, help="Initial model.")
-    parser.add_argument("--warmup_proportion", default=0.05, type=float,
+    parser.add_argument("--warmup_proportion", default=0.1, type=float,
                         help="Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10%% of training.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
@@ -423,6 +423,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     raise ValueError("wrong task type:{}".format(args.task))
 
                 logger.info("query_output.shape:{}".format(query_output.shape))
+                logger.info("logit_scale:{},exp:{}".format(model.visual_encoder.logit_scale, model.visual_encoder.logit_scale.exp()))
                 logger.info("visual_output.shape:{}".format(visual_output.shape))
                 logger.info("frame_output.shape:{}".format(frame_output.shape))
 
