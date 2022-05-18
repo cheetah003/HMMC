@@ -423,7 +423,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     raise ValueError("wrong task type:{}".format(args.task))
 
                 logger.info("query_output.shape:{}".format(query_output.shape))
-                logger.info("logit_scale:{},exp:{}".format(model.visual_encoder.logit_scale, model.visual_encoder.logit_scale.exp()))
+                logger.info("logit_scale:{},exp:{}".format(model.text_encoder.logit_scale, model.text_encoder.logit_scale.exp()))
                 logger.info("visual_output.shape:{}".format(visual_output.shape))
                 logger.info("frame_output.shape:{}".format(frame_output.shape))
 

@@ -158,9 +158,9 @@ class VisualEncoder(nn.Module):
         clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
         clip = build_model(clip_state_dict, local_rank=task_config.local_rank)
         self.use_temp = task_config.use_temp
-        self.logit_scale = copy.deepcopy(clip.logit_scale)
         self.is_vit = copy.deepcopy(clip.vit)
         self.visual = copy.deepcopy(clip.visual)
+
         if self.use_temp:
             self.temporal_transformer = Transformer(width=cross_config.temporal_hidden_size,
                                               layers=cross_config.temporal_hidden_layers,
@@ -231,25 +231,27 @@ class VisualEncoder(nn.Module):
             hidden = self.visual(image)
             x = hidden
         if return_hidden:
-            return x, hidden
-        return x
+            return x.float(), hidden.float()
+        return x.float()
 
 
 class TextEncoder(nn.Module):
     def __init__(self, task_config, cross_config):
         super().__init__()
         self.language = task_config.language
+        pretrained_clip_name = cross_config.pretrained_clip_name
+        if task_config.local_rank == 0:
+            logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
+        clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
+        clip = build_model(clip_state_dict, local_rank=task_config.local_rank)
+        self.logit_scale = copy.deepcopy(clip.logit_scale)
         if self.language == "english":
-            pretrained_clip_name = cross_config.pretrained_clip_name
-            if task_config.local_rank == 0:
-                logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
-            clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
-            clip = build_model(clip_state_dict, local_rank=task_config.local_rank)
             self.token_embedding = copy.deepcopy(clip.token_embedding)
             self.positional_embedding = copy.deepcopy(clip.positional_embedding)
             self.transformer = copy.deepcopy(clip.transformer)
             self.ln_final = copy.deepcopy(clip.ln_final)
             self.text_projection = copy.deepcopy(clip.text_projection)
+            self.dtype = clip.visual.conv1.weight.dtype
         elif self.language == "chinese":
             pretrained = task_config.pretrained_text
             t_config = AutoConfig.from_pretrained(pretrained)
@@ -279,24 +281,24 @@ class TextEncoder(nn.Module):
             return text_output
 
     def encode_text(self, text, return_hidden=False):
-        x = self.token_embedding(text)  # [batch_size, n_ctx, d_model]
+        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
-        pos_emd = self.positional_embedding[:x.size(1), :]
+        pos_emd = self.positional_embedding[:x.size(1), :].type(self.dtype)
         x = x + pos_emd
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
-        hidden = self.ln_final(x) @ self.text_projection
+        hidden = self.ln_final(x).type(self.dtype) @ self.text_projection
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = hidden[torch.arange(hidden.shape[0]), text.argmax(dim=-1)]
 
         if return_hidden:
-            return x, hidden
+            return x.float(), hidden.float()
 
-        return x
+        return x.float()
 
 
 class BertLMPredictionHead(nn.Module):

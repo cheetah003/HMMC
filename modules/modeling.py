@@ -213,7 +213,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         sequence_output = sequence_output.squeeze()
         sequence_output = sequence_output / sequence_output.norm(dim=-1, keepdim=True)
 
-        logit_scale = self.visual_encoder.logit_scale.exp()
+        logit_scale = self.text_encoder.logit_scale.exp()
         logit_scale.data = torch.clamp(logit_scale.data, max=100)
         # if self.rank == 0:
         #     logger.info("logit_scale:{},dtype:{}".format(logit_scale, logit_scale.dtype))
