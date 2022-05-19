@@ -35,7 +35,7 @@ class VATEX_multi_sentence_dataLoader(Dataset):
             root,
             language,
             subset,
-            json_path,
+            data_path,
             tokenizer,
             frame_sample,
             max_words=32,
@@ -47,7 +47,7 @@ class VATEX_multi_sentence_dataLoader(Dataset):
         self._txn = None
         self.root = root
         self.subset = subset
-        self.data_path = json_path
+        self.data_path = data_path
         self.feature_framerate = feature_framerate
         self.max_words = max_words
         self.max_frames = max_frames
@@ -58,7 +58,8 @@ class VATEX_multi_sentence_dataLoader(Dataset):
         # load the id of split list
         assert self.subset in ["train", "val", "test"]
         video_id_path_dict = {}
-        video_id_path_dict["train"] = os.path.join(self.data_path, "train_list.txt")
+        # video_id_path_dict["train"] = os.path.join(self.data_path, "train_list.txt")
+        video_id_path_dict["train"] = os.path.join(self.data_path, "vatex_train.txt")
         # video_id_path_dict["test"] = os.path.join(self.data_path, "test_list.txt")
         video_id_path_dict["test"] = os.path.join(self.data_path, "vatex_test_HGR.txt")
 
