@@ -488,12 +488,12 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
 
         # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
-            logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
-            sim_matrix = sim_matrix + sim_matrix_frame
+            # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
+            sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":
-            logger.info("sim_matrix_title:{}".format(sim_matrix_title))
-            sim_matrix = sim_matrix + sim_matrix_title
+            # logger.info("sim_matrix_title:{}".format(sim_matrix_title))
+            sim_matrix += sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
     tv_metrics = logging_rank(sim_matrix, multi_sentence_, cut_off_points_, logger)
@@ -637,14 +637,17 @@ def main():
                     # writer.add_histogram(name + '/grad', param.requires_grad_().clone().cpu().data.numpy(), epoch)
                 if epoch % 1 == 0:
                     ## Uncomment if want to save checkpoint
-                    # save_model(epoch, args, model, type_name="")
+                    output_model_file = save_model(epoch, args, model, type_name="")
                     # if epoch == 100:
                     metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
                     if args.logdir:
                         args.writer.add_scalars('metrics', {'R1': metrics["R1"], 'R5': metrics["R5"],
                                                             'R10': metrics["R10"]}, global_step=epoch)
-        if args.local_rank == 0:
-            save_model(epoch, args, model, type_name="")
+                    if best_score < metrics["R1"]:
+                        best_score = metrics["R1"]
+                        best_output_model_file = output_model_file
+                    logger.info("The best model is: {}, the R1 is: {:.4f}".format(best_output_model_file, best_score))
+
     elif args.do_eval:
         if args.local_rank == 0:
             eval_epoch(args, model, test_dataloader, device, n_gpu)

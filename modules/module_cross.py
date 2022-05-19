@@ -168,6 +168,9 @@ class VisualEncoder(nn.Module):
             self.frame_position_embeddings = nn.Embedding(cross_config.max_position_embeddings,
                                                       cross_config.temporal_hidden_size)
 
+            # use clip.transformer to initial temporal_transformer
+            # for param_1, param_2 in zip(self.temporal_transformer.parameters(), clip.transformer.parameters()):
+            #     param_1.data.copy_(param_2.data)  # initialize
     def forward(self, video, video_frames):
         # encode frames
         bs, frames, channel, h, w = video.shape

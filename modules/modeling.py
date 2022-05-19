@@ -372,9 +372,9 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             if self.rank == 0:
                 logger.info(
                     "dtype: v_fea:{},v_fea_k:{},title_fea:{}".format(v_fea.dtype, v_fea_k.dtype, title_fea.dtype))
-            # single modality: video queue loss
+            # single video modality: video queue loss
             v_queue_loss = self.frame_self_loss(frame_pred, frame_proj_k, self.queue_frame_proj_ng)
-            # cross modality: queue loss
+            # cross modality: cross queue loss
             cross_queue_loss = 0.
             v_tag_queue_loss = self.contrastive_loss(v_fea, tag_fea_k, self.queue_tag_cross_ng) \
                                + self.contrastive_loss(tag_fea, v_fea_k, self.queue_v_cross_ng)
@@ -390,23 +390,23 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                                                          title_fea_k, self.queue_title_cross_ng)
                 frame_cross_loss += (frame_tag_loss + frame_title_loss) / 2
                 cross_queue_loss += frame_cross_loss
+
+            # single text modality: text queue loss
+            t_queue_loss = self.contrastive_loss(title_fea, tag_fea_k, self.queue_tag_cross_ng) \
+                           + self.contrastive_loss(tag_fea, title_fea_k, self.queue_v_cross_ng)
+
             # dequeue_and_enqueue
             self._dequeue_and_enqueue(v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k)
 
-            # for MLM loss
-            mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
-            mlm_title_loss = self.get_mlm_loss(title_ids, title_mask)
-            mlm_loss = mlm_tag_loss + mlm_title_loss
-
             # total loss
             # loss += inbatch_loss + v_queue_loss + cross_queue_loss + mlm_loss
-            loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * mlm_loss
+            loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * t_queue_loss
             if self.rank == 0:
-                logger.info("loss:{},v_queue_loss:{},video_cross_loss:{},frame_cross_loss:{},mlm_loss:{}"
-                            "".format(loss, v_queue_loss, video_cross_loss, frame_cross_loss, mlm_loss))
+                logger.info("loss:{},v_queue_loss:{},video_cross_loss:{},frame_cross_loss:{},t_queue_loss:{}"
+                            "".format(loss, v_queue_loss, video_cross_loss, frame_cross_loss, t_queue_loss))
                 if self.task_config.logdir:
                     loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss), "video_cross_loss": float(video_cross_loss),
-                                 "frame_cross_loss": float(frame_cross_loss), "mlm_loss": float(mlm_loss)}
+                                 "frame_cross_loss": float(frame_cross_loss), "t_queue_loss": float(t_queue_loss)}
                     self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
             return loss
         else:
