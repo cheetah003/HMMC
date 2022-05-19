@@ -277,15 +277,15 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
                 loss = loss.mean()  # mean() to average on multi-gpu.
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
-
+        forward_time = time.time()
         if args.enable_amp:
             scaler.scale(loss).backward()
         else:
             loss.backward()
         total_loss += float(loss)
-        forward_and_backward_time = time.time()
+        backward_time = time.time()
         if global_step % log_step == 0 and local_rank == 0:
-            logger.info("forward_and_backward_time :{}".format(forward_and_backward_time - load_finish_time))
+            logger.info("forward_time:{},backward_time:{}".format(forward_time-load_finish_time, backward_time-forward_time))
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

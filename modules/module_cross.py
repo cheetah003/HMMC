@@ -19,7 +19,7 @@ from .file_utils import cached_path
 from .until_config import PretrainedConfig
 from .until_module import PreTrainedModel, LayerNorm, ACT2FN
 from collections import OrderedDict
-from modules.module_clip import build_model, CLIP
+from modules.module_clip import build_model, CLIP, convert_weights
 from transformers import AutoConfig, AutoModel, BertTokenizer
 
 
@@ -170,45 +170,40 @@ class VisualEncoder(nn.Module):
 
     def forward(self, video, video_frames):
         # encode frames
-        bs, _, channel, h, w = video.shape
-        visual_hidden_list = []
-        frame_hidden_list = []
-        for b in range(bs):
-            # [frame, 3, 224, 224]
-            video_frame = video_frames[b]
-            video_b = video[b, 0:video_frame, :, :, :]
-            # logger.info("video_b.shape:{}, dtype:{}".format(video_b.shape, video_b.dtype))
-            # logger.info("video_frame[{}]:{}".format(b, video_frame))
-            visual_hidden = self.encode_image(video_b, video_frame=video_frame)
-            # [frame, hidden_size]
-            # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
-            visual_hidden = visual_hidden.view(-1, visual_hidden.size(-1))
-            # logger.info("visual_hidden1.shape:{}".format(visual_hidden.shape))
-            # get temporal information
-            visual_hidden_original = visual_hidden
-            frame_hidden_list.append(visual_hidden_original)
-            if self.use_temp:
-                seq_length = visual_hidden.size(0)
-                position_ids = torch.arange(seq_length, dtype=torch.long, device=visual_hidden.device)
-                # logger.info("position_ids.shape:{}".format(position_ids.shape))
-                frame_position_embeddings = self.frame_position_embeddings(position_ids)
-                # logger.info("frame_position_embeddings.shape:{}".format(frame_position_embeddings.shape))
-                visual_hidden = visual_hidden + frame_position_embeddings
+        bs, frames, channel, h, w = video.shape
+        # [bs*frame, 3, 224, 224]
+        video = video.view(bs * frames, channel, h, w)
+        # logger.info("video_b.shape:{}, dtype:{}".format(video_b.shape, video_b.dtype))
+        # logger.info("video_frame[{}]:{}".format(b, video_frame))
+        visual_hidden = self.encode_image(video, video_frame=frames)
+        # [bs, frame, hidden_size]
+        # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
+        visual_hidden = visual_hidden.view(bs, frames, visual_hidden.size(-1))
+        # logger.info("visual_hidden1.shape:{}".format(visual_hidden.shape))
+        # get temporal information
+        visual_hidden_original = visual_hidden
+        frame_output = visual_hidden_original
+        if self.use_temp:
+            seq_length = visual_hidden.size(1)
+            position_ids = torch.arange(seq_length, dtype=torch.long, device=visual_hidden.device)
+            # logger.info("position_ids.shape:{}".format(position_ids.shape))
+            frame_position_embeddings = self.frame_position_embeddings(position_ids)
+            # logger.info("frame_position_embeddings.shape:{}".format(frame_position_embeddings.shape))
+            visual_hidden = visual_hidden + frame_position_embeddings
 
-                # visual_hidden = visual_hidden.permute(1, 0, 2)  # NLD -> LND
-                video_mask = torch.zeros([video_frame, video_frame], device=visual_hidden.device)
-                visual_hidden = self.temporal_transformer(visual_hidden, video_mask)
-                # visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
-                visual_hidden = visual_hidden + visual_hidden_original
+            video_mask = torch.ones([bs, frames], device=visual_hidden.device)
+            extended_video_mask = (1.0 - video_mask.unsqueeze(1)) * -1000000.0
+            extended_video_mask = extended_video_mask.expand(-1, video_mask.size(1), -1)
+            visual_hidden = visual_hidden.permute(1, 0, 2)  # NLD -> LND
+            visual_hidden = self.temporal_transformer(visual_hidden, extended_video_mask)
+            visual_hidden = visual_hidden.permute(1, 0, 2)  # LND -> NLD
+            visual_hidden = visual_hidden + visual_hidden_original
 
-            # [bs, frames,512] -> [bs, 1,512]
-            # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
-            visual_hidden = visual_hidden / visual_hidden.norm(dim=-1, keepdim=True)
-            visual_hidden = torch.mean(visual_hidden, dim=0)
-            # logger.info("visual_hidden mean.shape:{}".format(visual_hidden.shape))
-            visual_hidden_list.append(visual_hidden)
-        visual_output = torch.stack(visual_hidden_list, dim=0)
-        frame_output = torch.stack(frame_hidden_list, dim=0)
+        # logger.info("visual_hidden.shape:{}".format(visual_hidden.shape))
+        visual_output = visual_hidden / visual_hidden.norm(dim=-1, keepdim=True)
+        # [bs, frames,512] -> [bs, 512]
+        visual_output = torch.mean(visual_output, dim=1)
+        # logger.info("visual_hidden mean.shape:{}".format(visual_hidden.shape))
 
         # logger.info("visual encoder visual_output.shape:{}".format(visual_output.shape))
         return visual_output, frame_output
