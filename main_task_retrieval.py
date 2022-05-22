@@ -11,7 +11,7 @@ import numpy as np
 import random
 from thop import profile
 
-from metrics import compute_metrics, tensor_text_to_video_metrics, tensor_video_to_text_sim
+from metrics import logging_rank
 import time
 import argparse
 from sklearn import preprocessing
@@ -373,8 +373,6 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         cut_off_points_ = [itm - 1 for itm in cut_off_points_]
     logger.info("multi_sentence_:{}".format(multi_sentence_))
 
-
-
     with torch.no_grad():
         batch_query_output_list, batch_visual_output_list = [], []
         batch_title_output_list = []
@@ -423,7 +421,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     raise ValueError("wrong task type:{}".format(args.task))
 
                 logger.info("query_output.shape:{}".format(query_output.shape))
-                logger.info("logit_scale:{},exp:{}".format(model.text_encoder.logit_scale, model.text_encoder.logit_scale.exp()))
+                logger.info("weight_sim:{},exp:{}".format(model.weight_sim, model.text_encoder.logit_scale.exp()))
                 logger.info("visual_output.shape:{}".format(visual_output.shape))
                 logger.info("frame_output.shape:{}".format(frame_output.shape))
 
@@ -488,73 +486,26 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
 
         # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
+            weight_sim = model.weight_sim
+            if args.task == "retrieval_VT":
+                weight_frame = model.weight_frame
+            else:
+                weight_frame = 1 - weight_sim
             # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
-            sim_matrix += sim_matrix_frame
+            sim_matrix = weight_sim * sim_matrix + weight_frame * sim_matrix_frame
+            # sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":
             # logger.info("sim_matrix_title:{}".format(sim_matrix_title))
-            sim_matrix += sim_matrix_title
+            weight_sim = model.weight_sim
+            weight_frame = model.weight_frame
+            weight_title = 1 - weight_sim - weight_frame
+            sim_matrix += weight_title * sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
     tv_metrics = logging_rank(sim_matrix, multi_sentence_, cut_off_points_, logger)
     return tv_metrics
 
-
-def logging_rank(sim_matrix, multi_sentence_, cut_off_points_, logger):
-    """run similarity in one single gpu
-    Args:
-        sim_matrix: similarity matrix
-        multi_sentence_: indicate whether the multi sentence retrieval
-        cut_off_points_:  tag the label when calculate the metric
-        logger: logger for metric
-    Returns:
-        tv_metrics
-        # R1: rank 1 of text-to-video retrieval
-
-    """
-
-    if multi_sentence_:
-        # if adopting multi-sequence retrieval, the similarity matrix should be reshaped
-        logger.info("before reshape, sim matrix size: {} x {}".format(sim_matrix.shape[0], sim_matrix.shape[1]))
-        cut_off_points2len_ = [itm + 1 for itm in cut_off_points_]
-        max_length = max([e_-s_ for s_, e_ in zip([0]+cut_off_points2len_[:-1], cut_off_points2len_)])
-        sim_matrix_new = []
-        for s_, e_ in zip([0] + cut_off_points2len_[:-1], cut_off_points2len_):
-            sim_matrix_new.append(np.concatenate((sim_matrix[s_:e_],
-                                                  np.full((max_length-e_+s_, sim_matrix.shape[1]), -np.inf)), axis=0))
-        sim_matrix = np.stack(tuple(sim_matrix_new), axis=0)
-        logger.info("after reshape, sim matrix size: {} x {} x {}".
-                    format(sim_matrix.shape[0], sim_matrix.shape[1], sim_matrix.shape[2]))
-
-        # compute text-to-video retrieval
-        tv_metrics = tensor_text_to_video_metrics(sim_matrix)
-
-        # compute video-to-text retrieval
-        vt_metrics = compute_metrics(tensor_video_to_text_sim(sim_matrix))
-    else:
-        logger.info("sim matrix size: {}, {}".format(sim_matrix.shape[0], sim_matrix.shape[1]))
-
-        # compute text-to-video retrieval
-        tv_metrics = compute_metrics(sim_matrix)
-
-        # compute video-to-text retrieval
-        vt_metrics = compute_metrics(sim_matrix.T)
-        logger.info('\t Length-T: {}, Length-V:{}'.format(len(sim_matrix), len(sim_matrix[0])))
-
-
-    # logging the result of text-to-video retrieval
-    logger.info("Text-to-Video:")
-    logger.info('\t>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-                format(tv_metrics['R1'], tv_metrics['R5'], tv_metrics['R10'], tv_metrics['MR'], tv_metrics['MeanR']))
-
-    # logging the result of video-to-text retrieval
-    logger.info("Video-to-Text:")
-    logger.info(
-        '\t>>>  V2T$R@1: {:.1f} - V2T$R@5: {:.1f} - V2T$R@10: {:.1f} - V2T$Median R: {:.1f} - V2T$Mean R: {:.1f}'.format(
-            vt_metrics['R1'], vt_metrics['R5'], vt_metrics['R10'], vt_metrics['MR'], vt_metrics['MeanR']))
-
-    R1 = tv_metrics['R1']
-    return tv_metrics
 
 def main():
     global logger
@@ -635,7 +586,7 @@ def main():
                 # for name, param in model.named_parameters():
                     # args.writer.add_histogram(name, param.clone().cpu().data.numpy(), epoch)
                     # writer.add_histogram(name + '/grad', param.requires_grad_().clone().cpu().data.numpy(), epoch)
-                if epoch % 1 == 0:
+                if epoch % 5 == 0:
                     ## Uncomment if want to save checkpoint
                     output_model_file = save_model(epoch, args, model, type_name="")
                     # if epoch == 100:

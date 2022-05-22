@@ -171,6 +171,10 @@ class VisualEncoder(nn.Module):
             # use clip.transformer to initial temporal_transformer
             # for param_1, param_2 in zip(self.temporal_transformer.parameters(), clip.transformer.parameters()):
             #     param_1.data.copy_(param_2.data)  # initialize
+            # if task_config.local_rank == 0:
+            #     logger.info("clip.positional_embedding:{}".format(clip.positional_embedding))
+            # self.frame_position_embeddings.weight = copy.deepcopy(clip.positional_embedding)
+
     def forward(self, video, video_frames):
         # encode frames
         bs, frames, channel, h, w = video.shape

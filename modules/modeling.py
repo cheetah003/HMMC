@@ -418,7 +418,8 @@ class BirdModel(BirdPreTrainedModel):
         super(BirdPreTrainedModel, self).__init__(cross_config)
         self.task_config = task_config
         self.rank = task_config.local_rank
-        # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+        # self.weight_sim = torch.nn.Parameter(torch.tensor([0.9], dtype=torch.float32), requires_grad=True)
+        self.weight_sim = cross_config.weight_sim
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
@@ -464,12 +465,14 @@ class BirdModel(BirdPreTrainedModel):
             # in batch loss
             sim_matrix = self.loose_similarity(query_output, visual_output)
             sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            loss += sim_loss
+            loss += self.weight_sim * sim_loss
+            # loss += sim_loss
 
             # frame loss
             if self.task_config.use_frame_fea:
                 frame_loss = self.frame_loss(query_output, frame_output)
-                loss += frame_loss
+                loss += (1 - self.weight_sim) * frame_loss
+                # loss += frame_loss
 
             if self.task_config.local_rank == 0:
                 if global_step % self.task_config.n_display == 0:
@@ -489,12 +492,14 @@ class BirdModel_VT(BirdPreTrainedModel):
         super(BirdPreTrainedModel, self).__init__(cross_config)
         self.task_config = task_config
         self.rank = task_config.local_rank
-        # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+        # self.weight_sim = torch.nn.Parameter(torch.tensor([0.3], dtype=torch.float32), requires_grad=True)
+        # self.weight_frame = torch.nn.Parameter(torch.tensor([0.1], dtype=torch.float32), requires_grad=True)
+        self.weight_sim = 0.3
+        self.weight_frame = 0.1
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
         self.visual_encoder = VisualEncoder(self.task_config, cross_config)
-
         ################## loss function
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
@@ -518,11 +523,16 @@ class BirdModel_VT(BirdPreTrainedModel):
             # in batch loss
             sim_matrix = self.loose_similarity(query_output, visual_output)
             sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            loss += sim_loss
+            loss += self.weight_sim * sim_loss
 
             sim_matrix_title = self.loose_similarity(query_output, title_output)
             sim_loss_title = self.loss_fct(sim_matrix_title) + self.loss_fct(sim_matrix_title.T)
-            loss += sim_loss_title
+            loss += (1 - self.weight_sim - self.weight_frame) * sim_loss_title
+
+            # frame loss
+            if self.task_config.use_frame_fea:
+                frame_loss = self.frame_loss(query_output, frame_output)
+                loss += self.weight_frame * frame_loss
 
             if self.task_config.local_rank == 0:
                 if global_step % self.task_config.n_display == 0:

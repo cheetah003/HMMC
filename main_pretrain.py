@@ -10,7 +10,7 @@ import numpy as np
 import random
 from thop import profile
 
-from metrics import compute_metrics, tensor_text_to_video_metrics, tensor_video_to_text_sim
+from metrics import logging_rank
 import time
 import argparse
 from sklearn import preprocessing
@@ -44,7 +44,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--use_frame_fea", action='store_true', help="whether use frame feature matching text")
     parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
-    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt"],
+    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt", "vatex"],
                         help="choose dataset.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
@@ -352,10 +352,25 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
 
     model.eval()
     logger.info("args.task:{}".format(args.task))
+
+    # if multi_sentence_ == True: compute the similarity with multi-sentences retrieval
+    multi_sentence_ = False
+
+    cut_off_points_, sentence_num_, video_num_ = [], -1, -1
+    if hasattr(test_dataloader.dataset, 'multi_sentence_per_video') \
+            and test_dataloader.dataset.multi_sentence_per_video:
+        multi_sentence_ = True
+        cut_off_points_ = test_dataloader.dataset.cut_off_points  # used to tag the label when calculate the metric
+        sentence_num_ = test_dataloader.dataset.sentence_num  # used to cut the sentence representation
+        video_num_ = test_dataloader.dataset.video_num  # used to cut the video representation
+        cut_off_points_ = [itm - 1 for itm in cut_off_points_]
+    logger.info("multi_sentence_:{}".format(multi_sentence_))
+
     with torch.no_grad():
         batch_query_output_list, batch_visual_output_list = [], []
         batch_title_output_list = []
         batch_frame_output_list = []
+        total_video_num = 0
         # ----------------------------
         # 1. cache the features
         # ----------------------------
@@ -369,27 +384,44 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                 raise ValueError("wrong task type:{}".format(args.task))
 
             logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
-
-            logger.info("eval video.shape:{}".format(video.shape))
-            query_output = model.text_encoder(query_ids, query_mask)
-            visual_output, frame_output = model.visual_encoder(video, video_frame)
-            frame_output = torch.mean(frame_output, dim=1)
-            if args.task == "retrieval_VT":
-                title_output = model.text_encoder(title_ids, title_mask)
-                logger.info("title_output.shape:{}".format(title_output.shape))
-            elif args.task == "retrieval":
+            if multi_sentence_:
+                # multi-sentences retrieval means: one frame clip has two or more descriptions.
+                b, *_t = video.shape
+                query_output = model.text_encoder(query_ids, query_mask)
+                batch_query_output_list.append(query_output)
                 title_output = torch.zeros_like(query_output)
+                batch_title_output_list.append(title_output)
+                s_, e_ = total_video_num, total_video_num + b
+                filter_inds = [itm - s_ for itm in cut_off_points_ if s_ <= itm < e_]
+
+                if len(filter_inds) > 0:
+                    video = video[filter_inds, ...]
+                    visual_output, frame_output = model.visual_encoder(video, video_frame)
+                    frame_output = torch.mean(frame_output, dim=1)
+                    batch_visual_output_list.append(visual_output)
+                    batch_frame_output_list.append(frame_output)
+                total_video_num += b
             else:
-                raise ValueError("wrong task type:{}".format(args.task))
+                query_output = model.text_encoder(query_ids, query_mask)
+                visual_output, frame_output = model.visual_encoder(video, video_frame)
+                frame_output = torch.mean(frame_output, dim=1)
+                if args.task == "retrieval_VT":
+                    title_output = model.text_encoder(title_ids, title_mask)
+                    logger.info("title_output.shape:{}".format(title_output.shape))
+                elif args.task == "retrieval":
+                    title_output = torch.zeros_like(query_output)
+                else:
+                    raise ValueError("wrong task type:{}".format(args.task))
 
-            logger.info("query_output.shape:{}".format(query_output.shape))
-            logger.info("visual_output.shape:{}".format(visual_output.shape))
-            logger.info("frame_output.shape:{}".format(frame_output.shape))
+                logger.info("query_output.shape:{}".format(query_output.shape))
+                logger.info("weight_sim:{},exp:{}".format(model.weight_sim, model.text_encoder.logit_scale.exp()))
+                logger.info("visual_output.shape:{}".format(visual_output.shape))
+                logger.info("frame_output.shape:{}".format(frame_output.shape))
 
-            batch_query_output_list.append(query_output)
-            batch_visual_output_list.append(visual_output)
-            batch_title_output_list.append(title_output)
-            batch_frame_output_list.append(frame_output)
+                batch_query_output_list.append(query_output)
+                batch_visual_output_list.append(visual_output)
+                batch_title_output_list.append(title_output)
+                batch_frame_output_list.append(frame_output)
 
         # ----------------------------------
         # 2. calculate the similarity
@@ -424,8 +456,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_frame_output_splits.append(devc_batch_list)
 
             parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id],
-                                      batch_title_output_splits[dev_id], batch_frame_output_splits[dev_id]) for dev_id
-                                     in device_ids]
+                        batch_title_output_splits[dev_id], batch_frame_output_splits[dev_id]) for dev_id in device_ids]
             parallel_outputs_tuple = parallel_apply(_run_on_single_gpu, model, parameters_tuple_list, device_ids)
             sim_matrix = []
             sim_matrix_title = []
@@ -446,30 +477,26 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
             sim_matrix_frame = np.concatenate(tuple(sim_matrix_frame), axis=0)
 
-        logger.info("sim_matrix:{}".format(sim_matrix))
+        # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
-            logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
-            sim_matrix = sim_matrix + sim_matrix_frame
+            weight_sim = model.weight_sim
+            if args.task == "retrieval_VT":
+                weight_frame = model.weight_frame
+            else:
+                weight_frame = 1 - weight_sim
+            # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
+            sim_matrix = weight_sim * sim_matrix + weight_frame * sim_matrix_frame
+            # sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":
-            logger.info("sim_matrix_title:{}".format(sim_matrix_title))
-            sim_matrix = sim_matrix + sim_matrix_title
+            # logger.info("sim_matrix_title:{}".format(sim_matrix_title))
+            weight_sim = model.weight_sim
+            weight_frame = model.weight_frame
+            weight_title = 1 - weight_sim - weight_frame
+            sim_matrix += weight_title * sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
-    # sim_matrix = get_dual_matrix(sim_matrix)
-    tv_metrics = compute_metrics(sim_matrix)
-    vt_metrics = compute_metrics(sim_matrix.T)
-    logger.info('\t Length-T: {}, Length-V:{}'.format(len(sim_matrix), len(sim_matrix[0])))
-
-    logger.info("Text-to-Video:")
-    logger.info('\t>>>  R@1: {:.1f} - R@5: {:.1f} - R@10: {:.1f} - Median R: {:.1f} - Mean R: {:.1f}'.
-                format(tv_metrics['R1'], tv_metrics['R5'], tv_metrics['R10'], tv_metrics['MR'], tv_metrics['MeanR']))
-    logger.info("Video-to-Text:")
-    logger.info(
-        '\t>>>  V2T$R@1: {:.1f} - V2T$R@5: {:.1f} - V2T$R@10: {:.1f} - V2T$Median R: {:.1f} - V2T$Mean R: {:.1f}'.
-            format(vt_metrics['R1'], vt_metrics['R5'], vt_metrics['R10'], vt_metrics['MR'], vt_metrics['MeanR']))
-
-    R1 = tv_metrics['R1']
+    tv_metrics = logging_rank(sim_matrix, multi_sentence_, cut_off_points_, logger)
     return tv_metrics
 
 

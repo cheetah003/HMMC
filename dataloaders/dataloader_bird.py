@@ -271,7 +271,7 @@ class dataload_bird_train(VisionDataset):
         querylist = read_json_line(json_path)
         self.datalist = get_flat_query_list(querylist)
         # for fast debug
-        # self.datalist = self.datalist[0:50000:10]
+        self.datalist = self.datalist[0:45000:10]
 
         self._length = len(self.datalist)
         if self.language == "chinese":
@@ -408,6 +408,7 @@ class dataload_bird_train(VisionDataset):
             raise NotImplementedError("bilingual:not implemented!")
 
         query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
+        # logger.info("train:[{}]query:{},video:{}".format(index, query, videoid))
         if self.task == "retrieval_VT":
             title_ids, title_mask, _ = self._get_text(title, self.title_max_words)
             return query_ids, query_mask, video_data, frames, title_ids, title_mask, index
@@ -440,7 +441,7 @@ class dataload_bird_val(VisionDataset):
 
         self.datalist = read_json_line(json_path)
         # for fast debug
-        # self.datalist = self.datalist[:32]
+        self.datalist = self.datalist[:100]
 
         self._length = len(self.datalist)
         if self.language == "chinese":
@@ -558,7 +559,7 @@ class dataload_bird_val(VisionDataset):
             frames = self.max_frames
         video_data = self._get_video(videoid, frames)
         # query = "关于 " + query + " 的视频"
-        # print("[{}]query:{},video:{}".format(index, query, videoid))
+        # logger.info("val:[{}]query:{},video:{}".format(index, query, videoid))
         # print("video[{}]:{}".format(index, item['video_id']))
         query_ids, query_mask, _ = self._get_text(query, self.query_max_words)
 

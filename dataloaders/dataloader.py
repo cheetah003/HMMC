@@ -45,7 +45,8 @@ def dataloader_bird_train(args, tokenizer):
 
 def dataloader_bird_test(args, tokenizer):
     bird_testset = dataload_bird_val(root='/ai/swxdisk/data/bird/query_lmdb', language=args.language,
-                                     json_path="/ai/swxdisk/data/bird/query_data_val_bilingual.json", tokenizer=tokenizer, max_frames=args.max_frames,
+                                     json_path="/ai/swxdisk/data/bird/query_data_val_bilingual.json",
+                                     tokenizer=tokenizer, max_frames=args.max_frames,
                                      frame_sample_len=args.frame_sample_len, task=args.task)
     dataloader = DataLoader(
         bird_testset,
@@ -122,7 +123,7 @@ def dataloader_vatex_test(args, tokenizer):
 
 
 DATALOADER_DICT = {}
-DATALOADER_DICT["bird"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_msrvtt_train,
-                           "test": dataloader_msrvtt_test}
+DATALOADER_DICT["bird"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_bird_train,
+                           "test": dataloader_bird_test}
 DATALOADER_DICT["msrvtt"] = {"train": dataloader_msrvtt_train, "test": dataloader_msrvtt_test}
 DATALOADER_DICT["vatex"] = {"train": dataloader_vatex_train, "test": dataloader_vatex_test}
