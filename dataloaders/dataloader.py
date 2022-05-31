@@ -122,6 +122,21 @@ def dataloader_vatex_train(args, tokenizer):
     return dataloader, len(vatex_trainset), train_sampler
 
 
+def dataloader_vatex_val(args, tokenizer):
+    vatex_testset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
+                                       subset="val", frame_sample=args.frame_sample,
+                                       data_path='/ai/swxdisk/data/vatex',
+                                       tokenizer=tokenizer, max_frames=args.max_frames)
+    dataloader = DataLoader(
+        vatex_testset,
+        batch_size=args.batch_size_val,
+        num_workers=args.num_thread_reader,
+        shuffle=False,
+        drop_last=False,
+    )
+    return dataloader, len(vatex_testset)
+
+
 def dataloader_vatex_test(args, tokenizer):
     vatex_testset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
                                        subset="test", frame_sample=args.frame_sample,
@@ -141,4 +156,5 @@ DATALOADER_DICT = {}
 DATALOADER_DICT["bird"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_bird_train,
                            "test": dataloader_bird_test, "debug_test": dataloader_bird_debug_test}
 DATALOADER_DICT["msrvtt"] = {"train": dataloader_msrvtt_train, "test": dataloader_msrvtt_test}
-DATALOADER_DICT["vatex"] = {"train": dataloader_vatex_train, "test": dataloader_vatex_test}
+DATALOADER_DICT["vatex"] = {"train": dataloader_vatex_train, "val": dataloader_vatex_val,
+                            "test": dataloader_vatex_test}

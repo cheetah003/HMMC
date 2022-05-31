@@ -58,10 +58,9 @@ class VATEX_multi_sentence_dataLoader(Dataset):
         # load the id of split list
         assert self.subset in ["train", "val", "test"]
         video_id_path_dict = {}
-        # video_id_path_dict["train"] = os.path.join(self.data_path, "train_list.txt")
-        video_id_path_dict["train"] = os.path.join(self.data_path, "vatex_train.txt")
-        # video_id_path_dict["test"] = os.path.join(self.data_path, "test_list.txt")
-        video_id_path_dict["test"] = os.path.join(self.data_path, "vatex_test_HGR.txt")
+        video_id_path_dict["train"] = os.path.join(self.data_path, "train_list.txt")
+        video_id_path_dict["val"] = os.path.join(self.data_path, "val_list.txt")
+        video_id_path_dict["test"] = os.path.join(self.data_path, "test_list.txt")
 
         # construct ids for data loader
         with open(video_id_path_dict[self.subset], 'r') as fp:
