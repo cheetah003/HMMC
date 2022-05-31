@@ -95,6 +95,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.weight_v = cross_config.weight_sum_v
         self.weight_t = cross_config.weight_sum_t
         self.weight_cross = cross_config.weight_sum_cross
+        self.weight_sim = cross_config.weight_sim
+        self.weight_frame = cross_config.weight_frame
         self.contrast_momentum = task_config.contrast_momentum
         self.contrast_temperature = task_config.contrast_temperature
         self.contrast_num_negative = task_config.contrast_num_negative
@@ -104,10 +106,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         else:
             self.tokenizer = ClipTokenizer()
         if self.rank == 0:
-            logger.info("tokenizer:pad:{},cls:{},mask:{}, voacb_size:{}".format(self.tokenizer.pad_token_id,
-                                                                                type(self.tokenizer.cls_token_id),
-                                                                                self.tokenizer.mask_token_id,
-                                                                                self.tokenizer.vocab_size))
+            logger.info("voacb_size:{}".format(self.tokenizer.vocab_size))
         t_config = AutoConfig.from_pretrained(self.task_config.pretrained_text)
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         self.text_encoder_k = TextEncoder(self.task_config, cross_config)
@@ -258,10 +257,10 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         frame_proj_k = frame_proj_k.view(-1, frame_proj_k.size(-1))
 
         ptr = int(self.queue_ptr)
-        if self.rank == 0:
-            logger.info(
-                "begin>>>>: ptr:{},batch_size:{},frame_num:{},queue_size:{}".format(ptr, batch_size, frame_num, self.contrast_num_negative))
-            logger.info("v1_self_k.shape:{},tag_cross_k.shape:{},frame_proj_k.shape:{}".format(v_fea_k.shape, tag_fea_k.shape, frame_proj_k.shape))
+        # if self.rank == 0:
+        #     logger.info(
+        #         "begin>>>>: ptr:{},batch_size:{},frame_num:{},queue_size:{}".format(ptr, batch_size, frame_num, self.contrast_num_negative))
+        #     logger.info("v1_self_k.shape:{},tag_cross_k.shape:{},frame_proj_k.shape:{}".format(v_fea_k.shape, tag_fea_k.shape, frame_proj_k.shape))
 
         # replace the keys at ptr (dequeue and enqueue)
         self.queue_v_cross_ng[:, ptr:ptr + batch_size] = v_fea_k.T
@@ -273,8 +272,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         # move pointer
         ptr = (ptr + batch_size) % self.contrast_num_negative
 
-        if self.rank == 0:
-            logger.info("end>>>>: ptr:{}".format(ptr))
+        # if self.rank == 0:
+        #     logger.info("end>>>>: ptr:{}".format(ptr))
         self.queue_ptr[0] = ptr
 
     def contrastive_loss(self, q, k, queue):
@@ -332,7 +331,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         # bs x frames x 3 x H x W
         video = torch.as_tensor(video_data)
 
-        if self.rank == 0:
+        if self.rank == 0 and global_step % self.task_config.n_display == 0:
             logger.info("video1.shape:{}, dtype:{}, device:{}".format(video.shape, video.dtype, video.device))
 
         if self.training:
@@ -350,11 +349,12 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             frame_fea = frame_fea.view(bs, frame, hidden)
             frame_proj = frame_proj.view(bs, frame, hidden)
             frame_pred = frame_pred.view(bs, frame, hidden)
-            if self.rank == 0:
+            if self.rank == 0 and global_step % self.task_config.n_display == 0:
                 logger.info("v_fea.shape:{},device:{}".format(v_fea.shape, v_fea.device))
                 logger.info("frame_fea.shape:{},device:{}".format(frame_fea.shape, frame_fea.device))
                 logger.info("frame_proj.shape:{},device:{}".format(frame_proj.shape, frame_proj.device))
                 logger.info("title_fea.shape:{}".format(title_fea.shape))
+                logger.info("queue_v_cross_ng.shape:{}".format(self.queue_v_cross_ng.shape))
             # compute key features
             with torch.no_grad():  # no gradient to keys
                 self._momentum_update()  # update the key encoder
@@ -369,7 +369,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                 frame_proj_k = frame_proj_k.view(bs, frame, hidden)
 
             # compute loss
-            if self.rank == 0:
+            if self.rank == 0 and global_step % self.task_config.n_display == 0:
                 logger.info(
                     "dtype: v_fea:{},v_fea_k:{},title_fea:{}".format(v_fea.dtype, v_fea_k.dtype, title_fea.dtype))
             # single video modality: video queue loss
@@ -380,6 +380,12 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                                + self.contrastive_loss(tag_fea, v_fea_k, self.queue_v_cross_ng)
             v_title_queue_loss = self.contrastive_loss(v_fea, title_fea_k, self.queue_title_cross_ng) \
                                  + self.contrastive_loss(title_fea, v_fea_k, self.queue_v_cross_ng)
+            ####### for in batch
+            # sim_matrix_tag = self.loose_similarity(tag_fea, v_fea)
+            # v_tag_queue_loss = self.loss_fct(sim_matrix_tag) + self.loss_fct(sim_matrix_tag.T)
+            # sim_matrix_title = self.loose_similarity(title_fea, v_fea)
+            # v_title_queue_loss = self.loss_fct(sim_matrix_title) + self.loss_fct(sim_matrix_title.T)
+            ###### end in batch
             video_cross_loss = (v_tag_queue_loss + v_title_queue_loss) / 2
             cross_queue_loss += video_cross_loss
             frame_cross_loss = 0.
@@ -398,16 +404,25 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             # dequeue_and_enqueue
             self._dequeue_and_enqueue(v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k)
 
+            # mlm loss
+            # mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
+            # mlm_title_loss = self.get_mlm_loss(title_ids, title_mask)
+            # mlm_loss = mlm_tag_loss + mlm_title_loss
+
             # total loss
-            # loss += inbatch_loss + v_queue_loss + cross_queue_loss + mlm_loss
+            # loss = cross_queue_loss
+            # loss = self.weight_cross * cross_queue_loss + self.weight_t * mlm_loss
+            # loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss
             loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * t_queue_loss
             if self.rank == 0:
-                logger.info("loss:{},v_queue_loss:{},video_cross_loss:{},frame_cross_loss:{},t_queue_loss:{}"
-                            "".format(loss, v_queue_loss, video_cross_loss, frame_cross_loss, t_queue_loss))
+                if global_step % self.task_config.n_display == 0:
+                    logger.info("loss:{},v_queue_loss:{},video_cross_loss:{},frame_cross_loss:{},t_queue_loss:{}"
+                                "".format(loss, v_queue_loss, video_cross_loss, frame_cross_loss, t_queue_loss))
                 if self.task_config.logdir:
                     loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss), "video_cross_loss": float(video_cross_loss),
                                  "frame_cross_loss": float(frame_cross_loss), "t_queue_loss": float(t_queue_loss)}
                     self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
+                    # self.task_config.writer.add_scalar('loss', video_cross_loss, global_step=global_step)
             return loss
         else:
             return None
@@ -420,6 +435,7 @@ class BirdModel(BirdPreTrainedModel):
         self.rank = task_config.local_rank
         # self.weight_sim = torch.nn.Parameter(torch.tensor([0.9], dtype=torch.float32), requires_grad=True)
         self.weight_sim = cross_config.weight_sim
+        self.weight_frame = cross_config.weight_frame
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
@@ -462,17 +478,15 @@ class BirdModel(BirdPreTrainedModel):
             query_output = dist_collect(query_output).squeeze(1)
             frame_output = dist_collect(frame_output).squeeze(1)
 
-            # in batch loss
+            # frame loss
+            if self.task_config.use_frame_fea:
+                frame_loss = self.frame_loss(query_output, frame_output)
+                loss += self.weight_frame * frame_loss
+            # video loss
             sim_matrix = self.loose_similarity(query_output, visual_output)
             sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
             loss += self.weight_sim * sim_loss
             # loss += sim_loss
-
-            # frame loss
-            if self.task_config.use_frame_fea:
-                frame_loss = self.frame_loss(query_output, frame_output)
-                loss += (1 - self.weight_sim) * frame_loss
-                # loss += frame_loss
 
             if self.task_config.local_rank == 0:
                 if global_step % self.task_config.n_display == 0:
@@ -494,8 +508,9 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.rank = task_config.local_rank
         # self.weight_sim = torch.nn.Parameter(torch.tensor([0.3], dtype=torch.float32), requires_grad=True)
         # self.weight_frame = torch.nn.Parameter(torch.tensor([0.1], dtype=torch.float32), requires_grad=True)
-        self.weight_sim = 0.3
-        self.weight_frame = 0.1
+        self.weight_sim = cross_config.weight_sim
+        self.weight_frame = cross_config.weight_frame
+        self.weight_title = cross_config.weight_title
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
@@ -520,19 +535,22 @@ class BirdModel_VT(BirdPreTrainedModel):
             visual_output = dist_collect(visual_output).squeeze(1)
             query_output = dist_collect(query_output).squeeze(1)
             title_output = dist_collect(title_output).squeeze(1)
-            # in batch loss
-            sim_matrix = self.loose_similarity(query_output, visual_output)
-            sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            loss += self.weight_sim * sim_loss
-
-            sim_matrix_title = self.loose_similarity(query_output, title_output)
-            sim_loss_title = self.loss_fct(sim_matrix_title) + self.loss_fct(sim_matrix_title.T)
-            loss += (1 - self.weight_sim - self.weight_frame) * sim_loss_title
 
             # frame loss
-            if self.task_config.use_frame_fea:
-                frame_loss = self.frame_loss(query_output, frame_output)
-                loss += self.weight_frame * frame_loss
+            # if self.task_config.use_frame_fea:
+            #     frame_loss = self.frame_loss(query_output, frame_output)
+            #     # loss += self.weight_frame * frame_loss
+            #
+            # # video loss
+            # sim_matrix = self.loose_similarity(query_output, visual_output)
+            # sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+            # loss += self.weight_sim * sim_loss
+            sim_loss = 0
+
+            # title loss
+            sim_matrix_title = self.loose_similarity(query_output, title_output)
+            sim_loss_title = self.loss_fct(sim_matrix_title) + self.loss_fct(sim_matrix_title.T)
+            loss += self.weight_title * sim_loss_title
 
             if self.task_config.local_rank == 0:
                 if global_step % self.task_config.n_display == 0:

@@ -487,20 +487,16 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
             weight_sim = model.weight_sim
-            if args.task == "retrieval_VT":
-                weight_frame = model.weight_frame
-            else:
-                weight_frame = 1 - weight_sim
+            weight_frame = model.weight_frame
             # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
             sim_matrix = weight_sim * sim_matrix + weight_frame * sim_matrix_frame
             # sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":
             # logger.info("sim_matrix_title:{}".format(sim_matrix_title))
-            weight_sim = model.weight_sim
-            weight_frame = model.weight_frame
-            weight_title = 1 - weight_sim - weight_frame
+            weight_title = model.weight_title
             sim_matrix += weight_title * sim_matrix_title
+            # sim_matrix = weight_title * sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
     tv_metrics = logging_rank(sim_matrix, multi_sentence_, cut_off_points_, logger)
@@ -586,7 +582,7 @@ def main():
                 # for name, param in model.named_parameters():
                     # args.writer.add_histogram(name, param.clone().cpu().data.numpy(), epoch)
                     # writer.add_histogram(name + '/grad', param.requires_grad_().clone().cpu().data.numpy(), epoch)
-                if epoch % 5 == 0:
+                if epoch % 1 == 0:
                     ## Uncomment if want to save checkpoint
                     output_model_file = save_model(epoch, args, model, type_name="")
                     # if epoch == 100:

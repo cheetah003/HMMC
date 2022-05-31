@@ -12,5 +12,7 @@
   "weight_sum_t": 0.2,
   "weight_sum_cross": 0.6,
   "pretrained_clip_name": "ViT-B/32",
-  "weight_sim": 0.85
+  "weight_sim": 1,
+  "weight_frame": 1.0,
+  "weight_title": 1
 }

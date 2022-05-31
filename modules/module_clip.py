@@ -574,6 +574,6 @@ def build_model(state_dict: dict, local_rank):
             del state_dict[key]
 
     convert_weights(model)
-    model.load_state_dict(state_dict)
+    # model.load_state_dict(state_dict)
     # return model.eval()
     return model

@@ -5,6 +5,8 @@ from functools import lru_cache
 
 import ftfy
 import regex as re
+import logging
+logger = logging.getLogger(__name__)
 
 
 @lru_cache()
@@ -71,13 +73,18 @@ class SimpleTokenizer(object):
         for merge in merges:
             vocab.append(''.join(merge))
         vocab.extend(['<|startoftext|>', '<|endoftext|>'])
+        vocab[49394] = '[MASK]'
         self.encoder = dict(zip(vocab, range(len(vocab))))
         self.decoder = {v: k for k, v in self.encoder.items()}
         self.bpe_ranks = dict(zip(merges, range(len(merges))))
-        self.cache = {'<|startoftext|>': '<|startoftext|>', '<|endoftext|>': '<|endoftext|>'}
+        self.cache = {'<|startoftext|>': '<|startoftext|>', '<|endoftext|>': '<|endoftext|>', '[MASK]': '[MASK]'}
         self.pat = re.compile(r"""<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+""", re.IGNORECASE)
 
         self.vocab = self.encoder
+        self.vocab_size = len(vocab)
+        self.pad_token_id = self.encoder['<|endoftext|>']
+        self.cls_token_id = self.encoder["<|startoftext|>"]
+        self.mask_token_id = self.encoder['[MASK]']
 
     def bpe(self, token):
         if token in self.cache:

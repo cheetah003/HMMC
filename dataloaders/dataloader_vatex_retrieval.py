@@ -66,7 +66,6 @@ class VATEX_multi_sentence_dataLoader(Dataset):
         # construct ids for data loader
         with open(video_id_path_dict[self.subset], 'r') as fp:
             video_ids = [itm.strip() for itm in fp.readlines()]
-        print("video_ids:".format(video_ids))
 
         # load caption
         caption_file = os.path.join(self.data_path, "vatex_data.json")

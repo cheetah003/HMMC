@@ -20,15 +20,10 @@ from modules.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from modules.tokenization_clip import SimpleTokenizer as ClipTokenizer
 from modules.modeling import BirdModel_VT, BirdPreTrainedModel, BirdModel
 from modules.optimization import BertAdam
-from modules.until_module import get_dual_matrix
 from dataloaders.dataloader import DATALOADER_DICT
+from modules.until_module import get_dual_matrix
 from util import parallel_apply, get_logger
-
-try:
-    # noinspection PyUnresolvedReferences
-    from apex import amp
-except ImportError:
-    amp = None
+from torch.cuda.amp import autocast, GradScaler
 
 torch.distributed.init_process_group(backend="nccl")
 
@@ -67,6 +62,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--contrast_temperature', type=float, default=0.07, help='temperature')
     parser.add_argument('--language', type=str, default="chinese", choices=["chinese", "english"],
                         help='language for text encoder')
+    parser.add_argument('--use_temp', action='store_true', help='whether to use temporal transformer')
 
     parser.add_argument("--logdir", default=None, type=str, required=False, help="log dir for tensorboardX writer")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -82,9 +78,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--cache_dir", default="", type=str,
                         help="Where do you want to store the pre-trained models downloaded from s3")
 
-    parser.add_argument('--fp16_opt_level', type=str, default='O1',
-                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-                             "See details at https://nvidia.github.io/apex/amp.html")
+    parser.add_argument('--enable_amp', action='store_true', help="whether to use pytorch amp")
 
     parser.add_argument("--world_size", default=0, type=int, help="distribted training")
     parser.add_argument("--local_rank", default=0, type=int, help="distribted training")
@@ -205,8 +199,6 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                          schedule='warmup_cosine', b1=0.9, b2=0.98, e=1e-6,
                          t_total=num_train_optimization_steps, weight_decay=weight_decay,
                          max_grad_norm=1.0)
-    if args.fp16_opt_level != "O0":
-        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
@@ -245,7 +237,7 @@ def load_model(epoch, args, n_gpu, device, model_file=None):
     return model
 
 
-def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, scheduler, global_step, local_rank=0):
+def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, scheduler, scaler, global_step, local_rank=0):
     global logger
     torch.cuda.empty_cache()
     model.train()
@@ -255,41 +247,43 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     load_start_time = time.time()
     for step, batch in enumerate(train_dataloader):
         load_finish_time = time.time()
-        if args.local_rank == 0:
-            logger.info("[{}]data loader time:{}".format(args.local_rank, load_finish_time - load_start_time))
+        if global_step % log_step == 0 and local_rank == 0:
+            logger.info("data loader time:{}".format(load_finish_time - load_start_time))
         global_step += 1
         if n_gpu == 1:
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
 
-        video_data, frames, tag_ids, tag_mask, title_ids, title_mask = batch
-        loss = model(video_data, frames, tag_ids, tag_mask, title_ids, title_mask, global_step)
+        with autocast(enabled=args.enable_amp):
+            video_data, frames, tag_ids, tag_mask, title_ids, title_mask = batch
+            loss = model(video_data, frames, tag_ids, tag_mask, title_ids, title_mask, global_step)
 
-        if n_gpu > 1:
-            loss = loss.mean()  # mean() to average on multi-gpu.
-        if args.gradient_accumulation_steps > 1:
-            loss = loss / args.gradient_accumulation_steps
-        if args.fp16_opt_level != "O0":
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-                loss = scaled_loss
+            if n_gpu > 1:
+                loss = loss.mean()  # mean() to average on multi-gpu.
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+        forward_time = time.time()
+        if args.enable_amp:
+            scaler.scale(loss).backward()
         else:
             loss.backward()
         total_loss += float(loss)
-        forward_and_backward_time = time.time()
-        if args.local_rank == 0:
-            logger.info("[{}]forward_and_backward_time :{}".format(args.local_rank,
-                                                                   forward_and_backward_time - load_finish_time))
+        backward_time = time.time()
+        if global_step % log_step == 0 and local_rank == 0:
+            logger.info("forward_time:{},backward_time:{}".format(forward_time-load_finish_time, backward_time-forward_time))
+
         if (step + 1) % args.gradient_accumulation_steps == 0:
-            if args.fp16_opt_level != "O0":
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
-            else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             if scheduler is not None:
                 scheduler.step()  # Update learning rate schedule
 
-            optimizer.step()
+            if args.enable_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
             optimizer.zero_grad()
 
             if global_step % log_step == 0 and local_rank == 0:
@@ -301,9 +295,8 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
                             (time.time() - start_time) / (log_step * args.gradient_accumulation_steps))
                 if args.logdir:
                     # args.writer.add_scalar('loss', loss.item(), global_step=global_step)
-                    args.writer.add_scalars('lr', {"lr%d" % i: itm for i, itm in
-                                                   enumerate(sorted(list(set(optimizer.get_lr()))))},
-                                            global_step=global_step)
+                    args.writer.add_scalars('lr', {"lr%d" % i: itm for i, itm in enumerate(sorted(list(set(optimizer.get_lr()))))},
+                                      global_step=global_step)
                 start_time = time.time()
         load_start_time = time.time()
     total_loss = total_loss / len(train_dataloader)
@@ -320,8 +313,7 @@ def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
         title_each_row = []
         frame_each_row = []
         for idx2, (visual_output, title_output, frame_output) in enumerate(zip(batch_visual_output_list,
-                                                                               batch_title_output_list,
-                                                                               batch_frame_output_list)):
+                                                                    batch_title_output_list, batch_frame_output_list)):
             b1b2_logits = model.loose_similarity(query_output, visual_output)
             title_logits = model.loose_similarity(query_output, title_output)
             frame_logits = model.loose_similarity(query_output, frame_output)
@@ -480,19 +472,14 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
             weight_sim = model.weight_sim
-            if args.task == "retrieval_VT":
-                weight_frame = model.weight_frame
-            else:
-                weight_frame = 1 - weight_sim
+            weight_frame = model.weight_frame
             # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
             sim_matrix = weight_sim * sim_matrix + weight_frame * sim_matrix_frame
             # sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":
             # logger.info("sim_matrix_title:{}".format(sim_matrix_title))
-            weight_sim = model.weight_sim
-            weight_frame = model.weight_frame
-            weight_title = 1 - weight_sim - weight_frame
+            weight_title = model.weight_title
             sim_matrix += weight_title * sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
@@ -518,6 +505,12 @@ def main():
 
     assert args.dataset in DATALOADER_DICT
     test_dataloader, test_length = DATALOADER_DICT[args.dataset]["test"](args, tokenizer)
+    # test_dataloader, test_length = DATALOADER_DICT[args.dataset]["debug_test"](args, tokenizer)
+    # if args.language == "chinese":
+    #     test_dataloader, test_length = DATALOADER_DICT["vatex"]["test"](args, tokenizer)
+    # else:
+    #     test_dataloader, test_length = DATALOADER_DICT["msrvtt"]["test"](args, tokenizer)
+
     if args.local_rank == 0:
         logger.info("***** Running test *****")
         logger.info("  Num examples = %d", test_length)
@@ -543,22 +536,29 @@ def main():
         best_score = 0.00001
         best_output_model_file = "None"
         global_step = 0
+        if args.enable_amp:
+            scaler = GradScaler()
+        else:
+            scaler = None
         for epoch in range(args.epochs):
             train_sampler.set_epoch(epoch)
             tr_loss, global_step = train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer,
-                                               scheduler, global_step, local_rank=args.local_rank)
+                                               scheduler, scaler, global_step, local_rank=args.local_rank)
             if args.local_rank == 0:
                 logger.info("Epoch %d/%s Finished, Train Loss: %f", epoch + 1, args.epochs, tr_loss)
                 if epoch % 1 == 0:
-                    # Uncomment if want to save checkpoint
-                    # save_model(epoch, args, model, type_name="")
+                    ## Uncomment if want to save checkpoint
+                    output_model_file = save_model(epoch, args, model, type_name="")
                     # if epoch == 100:
                     metrics = eval_epoch(args, model, test_dataloader, device, n_gpu)
                     if args.logdir:
                         args.writer.add_scalars('metrics', {'R1': metrics["R1"], 'R5': metrics["R5"],
                                                             'R10': metrics["R10"]}, global_step=epoch)
-        if args.local_rank == 0:
-            save_model(epoch, args, model, type_name="")
+                    if best_score < metrics["R1"]:
+                        best_score = metrics["R1"]
+                        best_output_model_file = output_model_file
+                    logger.info("The best model is: {}, the R1 is: {:.4f}".format(best_output_model_file, best_score))
+
     elif args.do_eval:
         if args.local_rank == 0:
             eval_epoch(args, model, test_dataloader, device, n_gpu)

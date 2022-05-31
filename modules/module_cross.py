@@ -246,7 +246,7 @@ class TextEncoder(nn.Module):
             logger.info("pretrained_clip_name:{}".format(pretrained_clip_name))
         clip_state_dict = CLIP.get_config(pretrained_clip_name=pretrained_clip_name)
         clip = build_model(clip_state_dict, local_rank=task_config.local_rank)
-        self.logit_scale = copy.deepcopy(clip.logit_scale)
+        self.logit_scale = copy.deepcopy(clip_state_dict["logit_scale"])
         if self.language == "english":
             self.token_embedding = copy.deepcopy(clip.token_embedding)
             self.positional_embedding = copy.deepcopy(clip.positional_embedding)
