@@ -274,7 +274,6 @@ class TextEncoder(nn.Module):
             hidden = self.text_proj(temp_output[0])
             text_output = self.text_proj(temp_output[1])
 
-
         text_output = text_output.view(bs_pair, text_output.size(-1))
         hidden = hidden.view(bs_pair, -1, hidden.size(-1))
         if return_hidden:

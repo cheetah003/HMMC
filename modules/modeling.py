@@ -308,8 +308,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
     def frame_self_loss(self, frame_fea, frame_fea_k, queue_frame_ng):
         loss = 0.
         for i in range(frame_fea.size(1) - 1):
-            frame_loss = self.contrastive_loss(frame_fea[:, i, :], frame_fea_k[:, i, :], queue_frame_ng) + \
-                         self.contrastive_loss(frame_fea[:, i, :], frame_fea_k[:, i + 1, :], queue_frame_ng)
+            frame_loss = self.contrastive_loss(frame_fea[:, i, :], frame_fea_k[:, i+1, :], queue_frame_ng) \
+                        + self.contrastive_loss(frame_fea[:, i+1, :], frame_fea_k[:, i, :], queue_frame_ng)
             loss += frame_loss
         loss = loss / (frame_fea.size(1) - 1)
         return loss
@@ -398,29 +398,29 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
                 cross_queue_loss += frame_cross_loss
 
             # single text modality: text queue loss
-            t_queue_loss = self.contrastive_loss(title_fea, tag_fea_k, self.queue_tag_cross_ng) \
-                           + self.contrastive_loss(tag_fea, title_fea_k, self.queue_v_cross_ng)
+            # t_queue_loss = self.contrastive_loss(title_fea, tag_fea_k, self.queue_tag_cross_ng) \
+            #                + self.contrastive_loss(tag_fea, title_fea_k, self.queue_v_cross_ng)
 
             # dequeue_and_enqueue
             self._dequeue_and_enqueue(v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k)
 
             # mlm loss
-            # mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
-            # mlm_title_loss = self.get_mlm_loss(title_ids, title_mask)
-            # mlm_loss = mlm_tag_loss + mlm_title_loss
+            mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
+            mlm_title_loss = self.get_mlm_loss(title_ids, title_mask)
+            mlm_loss = mlm_tag_loss + mlm_title_loss
 
             # total loss
             # loss = cross_queue_loss
             # loss = self.weight_cross * cross_queue_loss + self.weight_t * mlm_loss
             # loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss
-            loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * t_queue_loss
+            loss = self.weight_v * v_queue_loss + self.weight_cross * cross_queue_loss + self.weight_t * mlm_loss
             if self.rank == 0:
                 if global_step % self.task_config.n_display == 0:
-                    logger.info("loss:{},v_queue_loss:{},video_cross_loss:{},frame_cross_loss:{},t_queue_loss:{}"
-                                "".format(loss, v_queue_loss, video_cross_loss, frame_cross_loss, t_queue_loss))
+                    logger.info("loss:{},v_queue_loss:{},video_cross_loss:{},frame_cross_loss:{},mlm_loss:{}"
+                                "".format(loss, v_queue_loss, video_cross_loss, frame_cross_loss, mlm_loss))
                 if self.task_config.logdir:
                     loss_item = {"loss": float(loss), "v_queue_loss": float(v_queue_loss), "video_cross_loss": float(video_cross_loss),
-                                 "frame_cross_loss": float(frame_cross_loss), "t_queue_loss": float(t_queue_loss)}
+                                 "frame_cross_loss": float(frame_cross_loss), "mlm_loss": float(mlm_loss)}
                     self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
                     # self.task_config.writer.add_scalar('loss', video_cross_loss, global_step=global_step)
             return loss

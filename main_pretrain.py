@@ -504,12 +504,12 @@ def main():
     model = init_model(args, device, n_gpu, args.local_rank)
 
     assert args.dataset in DATALOADER_DICT
-    test_dataloader, test_length = DATALOADER_DICT[args.dataset]["test"](args, tokenizer)
+    # test_dataloader, test_length = DATALOADER_DICT[args.dataset]["test"](args, tokenizer)
     # test_dataloader, test_length = DATALOADER_DICT[args.dataset]["debug_test"](args, tokenizer)
-    # if args.language == "chinese":
-    #     test_dataloader, test_length = DATALOADER_DICT["vatex"]["test"](args, tokenizer)
-    # else:
-    #     test_dataloader, test_length = DATALOADER_DICT["msrvtt"]["test"](args, tokenizer)
+    if args.language == "chinese":
+        test_dataloader, test_length = DATALOADER_DICT["vatex"]["test"](args, tokenizer)
+    else:
+        test_dataloader, test_length = DATALOADER_DICT["msrvtt"]["test"](args, tokenizer)
 
     if args.local_rank == 0:
         logger.info("***** Running test *****")
