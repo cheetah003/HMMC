@@ -74,7 +74,7 @@ def dataloader_bird_debug_test(args, tokenizer):
 
 
 def dataloader_msrvtt_train(args, tokenizer):
-    msrvtt_trainset = MSRVTT_TrainDataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
+    msrvtt_trainset = MSRVTT_TrainDataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/cfm_msrvtt_lmdb",
                                              csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_train.9k.csv",
                                              json_path="/ai/swxdisk/data/msrvtt/MSRVTT_data.json",
                                              frame_sample=args.frame_sample, max_frames=args.max_frames)
@@ -92,7 +92,7 @@ def dataloader_msrvtt_train(args, tokenizer):
 
 
 def dataloader_msrvtt_test(args, tokenizer):
-    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/msrvtt_lmdb",
+    msrvtt_testset = MSRVTT_DataLoader(tokenizer=tokenizer, root="/ai/swxdisk/data/msrvtt/cfm_msrvtt_lmdb",
                                        csv_path="/ai/swxdisk/data/msrvtt/MSRVTT_JSFUSION_test.csv",
                                        max_frames=args.max_frames)
     dataloader = DataLoader(
@@ -124,7 +124,7 @@ def dataloader_vatex_train(args, tokenizer):
 
 def dataloader_vatex_val(args, tokenizer):
     vatex_testset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
-                                       subset="val", frame_sample=args.frame_sample,
+                                       subset="val", frame_sample="uniform",
                                        data_path='/ai/swxdisk/data/vatex',
                                        tokenizer=tokenizer, max_frames=args.max_frames)
     dataloader = DataLoader(
@@ -139,7 +139,7 @@ def dataloader_vatex_val(args, tokenizer):
 
 def dataloader_vatex_test(args, tokenizer):
     vatex_testset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
-                                       subset="test", frame_sample=args.frame_sample,
+                                       subset="test", frame_sample="uniform",
                                        data_path='/ai/swxdisk/data/vatex',
                                        tokenizer=tokenizer, max_frames=args.max_frames)
     dataloader = DataLoader(

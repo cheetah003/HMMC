@@ -20,7 +20,7 @@ from PIL import ImageFilter
 from dataloaders.randaugment import RandomAugment
 
 # global, number of frames in lmdb per video
-g_lmdb_frames = 48
+g_lmdb_frames = 30
 
 class GaussianBlur(object):
     """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""

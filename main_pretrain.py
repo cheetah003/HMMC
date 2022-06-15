@@ -375,7 +375,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             else:
                 raise ValueError("wrong task type:{}".format(args.task))
 
-            logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
+            print("bid:{}/{}".format(bid, len(test_dataloader)), end="\r")
             if multi_sentence_:
                 # multi-sentences retrieval means: one frame clip has two or more descriptions.
                 b, *_t = video.shape
@@ -471,10 +471,10 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
 
         # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
-            weight_sim = model.weight_sim
-            weight_frame = model.weight_frame
+            weight_VTM = model.weight_VTM
+            weight_FTM = model.weight_FTM
             # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
-            sim_matrix = weight_sim * sim_matrix + weight_frame * sim_matrix_frame
+            sim_matrix = weight_VTM * sim_matrix + weight_FTM * sim_matrix_frame
             # sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":

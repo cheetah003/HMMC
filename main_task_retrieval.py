@@ -4,7 +4,6 @@ from __future__ import unicode_literals
 from __future__ import print_function
 import os
 
-
 import torch
 from torch.utils.data import (SequentialSampler)
 import numpy as np
@@ -234,7 +233,7 @@ def load_model(epoch, args, n_gpu, device, model_file=None):
                                                                        'distributed')
         if args.task == "retrieval":
             model = BirdModel.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
-                                             task_config=args)
+                                              task_config=args)
         elif args.task == "retrieval_VT":
             model = BirdModel_VT.from_pretrained(args.cross_model, cache_dir=cache_dir, state_dict=model_state_dict,
                                                  task_config=args)
@@ -285,7 +284,7 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
         total_loss += float(loss)
         backward_time = time.time()
         if global_step % log_step == 0 and local_rank == 0:
-            logger.info("forward_time:{},backward_time:{}".format(forward_time-load_finish_time, backward_time-forward_time))
+            logger.info("forward_time:{},backward_time:{}".format(forward_time - load_finish_time, backward_time - forward_time))
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -311,7 +310,7 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
                 if args.logdir:
                     # args.writer.add_scalar('loss', loss.item(), global_step=global_step)
                     args.writer.add_scalars('lr', {"lr%d" % i: itm for i, itm in enumerate(sorted(list(set(optimizer.get_lr()))))},
-                                      global_step=global_step)
+                                            global_step=global_step)
                 start_time = time.time()
         load_start_time = time.time()
     total_loss = total_loss / len(train_dataloader)
@@ -328,7 +327,7 @@ def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
         title_each_row = []
         frame_each_row = []
         for idx2, (visual_output, title_output, frame_output) in enumerate(zip(batch_visual_output_list,
-                                                                    batch_title_output_list, batch_frame_output_list)):
+                                                                               batch_title_output_list, batch_frame_output_list)):
             b1b2_logits = model.loose_similarity(query_output, visual_output)
             title_logits = model.loose_similarity(query_output, title_output)
             frame_logits = model.loose_similarity(query_output, frame_output)
@@ -390,7 +389,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             else:
                 raise ValueError("wrong task type:{}".format(args.task))
 
-            logger.info("bid:{}/{}".format(bid, len(test_dataloader)))
+            print("bid:{}/{}".format(bid, len(test_dataloader)), end="\r")
             if multi_sentence_:
                 # multi-sentences retrieval means: one frame clip has two or more descriptions.
                 b, *_t = video.shape
@@ -421,7 +420,8 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     raise ValueError("wrong task type:{}".format(args.task))
 
                 logger.info("query_output.shape:{}".format(query_output.shape))
-                logger.info("weight_sim:{},exp:{}".format(model.weight_sim, model.text_encoder.logit_scale.exp()))
+                logger.info("weight_VTM:{},weight_FTM:{},exp:{}".format(model.weight_VTM, model.weight_FTM,
+                                                                        model.text_encoder.logit_scale.exp()))
                 logger.info("visual_output.shape:{}".format(visual_output.shape))
                 logger.info("frame_output.shape:{}".format(frame_output.shape))
 
@@ -463,7 +463,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_frame_output_splits.append(devc_batch_list)
 
             parameters_tuple_list = [(batch_t_output_splits[dev_id], batch_v_output_splits[dev_id],
-                        batch_title_output_splits[dev_id], batch_frame_output_splits[dev_id]) for dev_id in device_ids]
+                                      batch_title_output_splits[dev_id], batch_frame_output_splits[dev_id]) for dev_id in device_ids]
             parallel_outputs_tuple = parallel_apply(_run_on_single_gpu, model, parameters_tuple_list, device_ids)
             sim_matrix = []
             sim_matrix_title = []
@@ -486,10 +486,10 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
 
         # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
-            weight_sim = model.weight_sim
-            weight_frame = model.weight_frame
+            weight_VTM = model.weight_VTM
+            weight_FTM = model.weight_FTM
             # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
-            sim_matrix = weight_sim * sim_matrix + weight_frame * sim_matrix_frame
+            sim_matrix = weight_VTM * sim_matrix + weight_FTM * sim_matrix_frame
             # sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":
@@ -580,8 +580,8 @@ def main():
             if args.local_rank == 0:
                 logger.info("Epoch %d/%s Finished, Train Loss: %f", epoch + 1, args.epochs, tr_loss)
                 # for name, param in model.named_parameters():
-                    # args.writer.add_histogram(name, param.clone().cpu().data.numpy(), epoch)
-                    # writer.add_histogram(name + '/grad', param.requires_grad_().clone().cpu().data.numpy(), epoch)
+                # args.writer.add_histogram(name, param.clone().cpu().data.numpy(), epoch)
+                # writer.add_histogram(name + '/grad', param.requires_grad_().clone().cpu().data.numpy(), epoch)
                 if epoch % 1 == 0:
                     ## Uncomment if want to save checkpoint
                     output_model_file = save_model(epoch, args, model, type_name="")
