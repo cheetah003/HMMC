@@ -91,6 +91,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         self.mlm_probability = cross_config.mlm_probability
+        self.top_frames = task_config.top_frames
         # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
         self.weight_FAM = cross_config.weight_FAM
         self.weight_VTM = cross_config.weight_VTM
@@ -217,7 +218,13 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         #     logger.info("logit_scale:{},dtype:{}".format(logit_scale, logit_scale.dtype))
         #     logger.info("sequence_output.shape:{}".format(sequence_output.shape))
         #     logger.info("visual_output.shape:{}".format(visual_output.shape))
-        retrieve_logits = logit_scale * torch.matmul(sequence_output, visual_output.t())
+        if len(visual_output.shape) == 2:
+            retrieve_logits = logit_scale * torch.matmul(sequence_output, visual_output.t())
+        else:
+            visual_temp = visual_output.permute(0, 2, 1)
+            retrieve_logits = logit_scale * torch.matmul(sequence_output, visual_temp)
+            retrieve_logits = retrieve_logits.permute(1, 0, 2)
+
         return retrieve_logits
 
     @torch.no_grad()
@@ -306,6 +313,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
 
     def frame_self_loss(self, frame_fea, frame_fea_k, queue_frame_ng):
         loss = 0.
+
         for i in range(frame_fea.size(1) - 1):
             frame_loss = self.contrastive_loss(frame_fea[:, i, :], frame_fea_k[:, i+1, :], queue_frame_ng) \
                         + self.contrastive_loss(frame_fea[:, i+1, :], frame_fea_k[:, i, :], queue_frame_ng)
@@ -429,6 +437,7 @@ class BirdModel(BirdPreTrainedModel):
         # self.weight_sim = torch.nn.Parameter(torch.tensor([0.9], dtype=torch.float32), requires_grad=True)
         self.weight_VTM = cross_config.weight_VTM
         self.weight_FTM = cross_config.weight_FTM
+        self.top_frames = task_config.top_frames
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder
@@ -445,8 +454,11 @@ class BirdModel(BirdPreTrainedModel):
             sim_matrix = self.loose_similarity(query_output, frame_single)
             sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
             loss += sim_loss / frame_num
-        # frame_single, _ = torch.max(frame_output, dim=1)
-        # sim_matrix = self.loose_similarity(query_output, frame_single)
+        # logger.info("frame_output.shape:{},dtype:{}".format(frame_output.shape, frame_output.dtype))
+        # logger.info("query_output.shape:{},dtype:{}".format(query_output.shape, frame_output.dtype))
+        # sim_matrix = self.loose_similarity(query_output, frame_output)
+        # sim_matrix = torch.topk(sim_matrix, k=self.top_frames, dim=2)[0]
+        # sim_matrix = torch.mean(sim_matrix, dim=2)
         # sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
         # loss += sim_loss
         return loss

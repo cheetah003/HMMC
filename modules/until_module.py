@@ -44,7 +44,8 @@ def get_dual_matrix(sim_matrix):
     temp = 1
     # sim_matrix = sim_matrix * F.softmax(sim_matrix / temp, dim=0) * len(sim_matrix)
     alpha = F.softmax(sim_matrix / temp, dim=0)
-    sim_matrix = sim_matrix * alpha
+    beta = F.softmax(sim_matrix / temp, dim=1)
+    sim_matrix = sim_matrix * alpha * beta
     return sim_matrix
 
 

@@ -53,6 +53,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument('--seed', type=int, default=42, help='random seed')
     parser.add_argument('--max_words', type=int, default=32, help='')
     parser.add_argument('--max_frames', type=int, default=12, help='')
+    parser.add_argument('--top_frames', type=int, default=3, help='')
     parser.add_argument('--frame_sample', type=str, default="uniform", choices=["uniform", "random", "uniform_random"],
                         help='frame sample strategy')
     parser.add_argument('--frame_sample_len', type=str, default="fix", choices=["dynamic", "fix"],
@@ -331,6 +332,8 @@ def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
             b1b2_logits = model.loose_similarity(query_output, visual_output)
             title_logits = model.loose_similarity(query_output, title_output)
             frame_logits = model.loose_similarity(query_output, frame_output)
+            frame_logits = torch.topk(frame_logits, k=model.top_frames, dim=2)[0]
+            frame_logits = torch.mean(frame_logits, dim=2)
             b1b2_logits = b1b2_logits.cpu().detach().numpy()
             title_logits = title_logits.cpu().detach().numpy()
             frame_logits = frame_logits.cpu().detach().numpy()
@@ -403,14 +406,14 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                 if len(filter_inds) > 0:
                     video = video[filter_inds, ...]
                     visual_output, frame_output = model.visual_encoder(video, video_frame)
-                    frame_output = torch.mean(frame_output, dim=1)
+                    # frame_output = torch.mean(frame_output, dim=1)
                     batch_visual_output_list.append(visual_output)
                     batch_frame_output_list.append(frame_output)
                 total_video_num += b
             else:
                 query_output = model.text_encoder(query_ids, query_mask)
                 visual_output, frame_output = model.visual_encoder(video, video_frame)
-                frame_output = torch.mean(frame_output, dim=1)
+                # frame_output = torch.mean(frame_output, dim=1)
                 if args.task == "retrieval_VT":
                     title_output = model.text_encoder(title_ids, title_mask)
                     logger.info("title_output.shape:{}".format(title_output.shape))
@@ -419,11 +422,11 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                 else:
                     raise ValueError("wrong task type:{}".format(args.task))
 
-                logger.info("query_output.shape:{}".format(query_output.shape))
-                logger.info("weight_VTM:{},weight_FTM:{},exp:{}".format(model.weight_VTM, model.weight_FTM,
-                                                                        model.text_encoder.logit_scale.exp()))
-                logger.info("visual_output.shape:{}".format(visual_output.shape))
-                logger.info("frame_output.shape:{}".format(frame_output.shape))
+                # logger.info("query_output.shape:{}".format(query_output.shape))
+                # logger.info("weight_VTM:{},weight_FTM:{},exp:{}".format(model.weight_VTM, model.weight_FTM,
+                #                                                         model.text_encoder.logit_scale.exp()))
+                # logger.info("visual_output.shape:{}".format(visual_output.shape))
+                # logger.info("frame_output.shape:{}".format(frame_output.shape))
 
                 batch_query_output_list.append(query_output)
                 batch_visual_output_list.append(visual_output)
@@ -486,11 +489,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
 
         # logger.info("sim_matrix:{}".format(sim_matrix))
         if args.use_frame_fea:
-            weight_VTM = model.weight_VTM
-            weight_FTM = model.weight_FTM
-            # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame))
-            sim_matrix = weight_VTM * sim_matrix + weight_FTM * sim_matrix_frame
-            # sim_matrix += sim_matrix_frame
+            sim_matrix += sim_matrix_frame
 
         if args.task == "retrieval_VT":
             # logger.info("sim_matrix_title:{}".format(sim_matrix_title))
@@ -499,6 +498,8 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             # sim_matrix = weight_title * sim_matrix_title
 
     logger.info("sim matrix size:  {}".format(np.array(sim_matrix).shape))
+    # sim_matrix = get_dual_matrix(sim_matrix)
+
     tv_metrics = logging_rank(sim_matrix, multi_sentence_, cut_off_points_, logger)
     return tv_metrics
 
