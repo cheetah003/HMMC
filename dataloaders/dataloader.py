@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from dataloaders.dataloader_bird import dataload_bird_pretrain, dataload_bird_train, dataload_bird_val, dataload_bird_debug_test
 from dataloaders.dataloader_msrvtt_retrieval import MSRVTT_TrainDataLoader, MSRVTT_DataLoader
 from dataloaders.dataloader_vatex_retrieval import VATEX_multi_sentence_dataLoader
+from dataloaders.dataloader_msvd_retrieval import MSVD_DataLoader
 
 
 def dataloader_bird_pretrain(args, tokenizer):
@@ -152,9 +153,58 @@ def dataloader_vatex_test(args, tokenizer):
     return dataloader, len(vatex_testset)
 
 
+def dataloader_msvd_train(args, tokenizer):
+    vatex_trainset = MSVD_DataLoader(root='/ai/swxdisk/data/msvd/msvd_lmdb',
+                                          data_path='/ai/swxdisk/data/msvd', tokenizer=tokenizer, subset="train",
+                                          frame_sample=args.frame_sample, max_frames=args.max_frames)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(vatex_trainset)
+    dataloader = DataLoader(
+        vatex_trainset,
+        batch_size=args.batch_size // args.n_gpu,
+        num_workers=args.num_thread_reader,
+        pin_memory=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        drop_last=True,
+    )
+    return dataloader, len(vatex_trainset), train_sampler
+
+
+def dataloader_msvd_val(args, tokenizer):
+    vatex_testset = MSVD_DataLoader(root='/ai/swxdisk/data/msvd/msvd_lmdb',
+                                       subset="val", frame_sample="uniform",
+                                       data_path='/ai/swxdisk/data/msvd',
+                                       tokenizer=tokenizer, max_frames=args.max_frames)
+    dataloader = DataLoader(
+        vatex_testset,
+        batch_size=args.batch_size_val,
+        num_workers=args.num_thread_reader,
+        shuffle=False,
+        drop_last=False,
+    )
+    return dataloader, len(vatex_testset)
+
+
+def dataloader_msvd_test(args, tokenizer):
+    vatex_testset = MSVD_DataLoader(root='/ai/swxdisk/data/msvd/msvd_lmdb',
+                                       subset="test", frame_sample="uniform",
+                                       data_path='/ai/swxdisk/data/msvd',
+                                       tokenizer=tokenizer, max_frames=args.max_frames)
+    dataloader = DataLoader(
+        vatex_testset,
+        batch_size=args.batch_size_val,
+        num_workers=args.num_thread_reader,
+        shuffle=False,
+        drop_last=False,
+    )
+    return dataloader, len(vatex_testset)
+
+
 DATALOADER_DICT = {}
 DATALOADER_DICT["bird"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_bird_train,
                            "test": dataloader_bird_test, "debug_test": dataloader_bird_debug_test}
 DATALOADER_DICT["msrvtt"] = {"train": dataloader_msrvtt_train, "test": dataloader_msrvtt_test}
 DATALOADER_DICT["vatex"] = {"train": dataloader_vatex_train, "val": dataloader_vatex_val,
                             "test": dataloader_vatex_test}
+DATALOADER_DICT["msvd"] = {"train": dataloader_msvd_train, "val": dataloader_msvd_val,
+                            "test": dataloader_msvd_test}

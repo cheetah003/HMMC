@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import logging
 from abc import ABC
+import random
 import torch
 from torch import nn
 import numpy as np
@@ -136,10 +137,12 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.copy_params()
         ################## create queue
         self.register_buffer("queue_v_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
-        self.register_buffer("queue_frame_proj_ng", torch.randn(cross_config.temporal_hidden_size,
-                                                                self.contrast_num_negative * self.task_config.max_frames))
-        self.register_buffer("queue_frame_cross_ng", torch.randn(cross_config.temporal_hidden_size,
-                                                                 self.contrast_num_negative * self.task_config.max_frames))
+        # self.register_buffer("queue_frame_proj_ng", torch.randn(cross_config.temporal_hidden_size,
+        #                                                    self.contrast_num_negative * self.task_config.max_frames))
+        self.register_buffer("queue_frame_proj_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
+        # self.register_buffer("queue_frame_cross_ng", torch.randn(cross_config.temporal_hidden_size,
+        #                                                    self.contrast_num_negative * self.task_config.max_frames))
+        self.register_buffer("queue_frame_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
         self.register_buffer("queue_title_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
         self.register_buffer("queue_tag_cross_ng", torch.randn(cross_config.temporal_hidden_size, self.contrast_num_negative))
         self.queue_v_cross_ng = F.normalize(self.queue_v_cross_ng, dim=0)
@@ -149,6 +152,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.queue_tag_cross_ng = F.normalize(self.queue_tag_cross_ng, dim=0)
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+        self.register_buffer("queue_ptr_frame", torch.zeros(1, dtype=torch.long))
 
         ################## loss function
         self.loss_fct = CrossEn()
@@ -244,6 +248,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
     def _dequeue_and_enqueue(self, v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k):
 
         # gather keys before updating queue
+
         # [bs,hidden]
         v_fea_k = dist_collect(v_fea_k).squeeze()
         v_fea_k = F.normalize(v_fea_k, dim=1)
@@ -251,18 +256,21 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         tag_fea_k = F.normalize(tag_fea_k, dim=1)
         title_fea_k = dist_collect(title_fea_k).squeeze()
         title_fea_k = F.normalize(title_fea_k, dim=1)
-        # [bs,frame,hidden]
-        frame_fea_k = dist_collect(frame_fea_k).squeeze()
-        frame_fea_k = F.normalize(frame_fea_k, dim=2)
-        frame_proj_k = dist_collect(frame_proj_k).squeeze()
-        frame_proj_k = F.normalize(frame_proj_k, dim=2)
 
-        batch_size = v_fea_k.size(0)
+        frame_fea_k = dist_collect(frame_fea_k).squeeze()
+        frame_proj_k = dist_collect(frame_proj_k).squeeze()
+        # [bs,frame,hidden]
+        frame_fea_k = F.normalize(frame_fea_k, dim=2)
+        frame_proj_k = F.normalize(frame_proj_k, dim=2)
+        #
         frame_num = frame_fea_k.size(1)
         frame_fea_k = frame_fea_k.view(-1, frame_fea_k.size(-1))
         frame_proj_k = frame_proj_k.view(-1, frame_proj_k.size(-1))
 
+        batch_size = v_fea_k.size(0)
+
         ptr = int(self.queue_ptr)
+        ptr_frame = int(self.queue_ptr_frame)
         # if self.rank == 0:
         #     logger.info(
         #         "begin>>>>: ptr:{},batch_size:{},frame_num:{},queue_size:{}".format(ptr, batch_size, frame_num, self.contrast_num_negative))
@@ -273,14 +281,15 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.queue_tag_cross_ng[:, ptr:ptr + batch_size] = tag_fea_k.T
         self.queue_title_cross_ng[:, ptr:ptr + batch_size] = title_fea_k.T
 
-        self.queue_frame_proj_ng[:, ptr * frame_num:(ptr + batch_size) * frame_num] = frame_proj_k.T
-        self.queue_frame_cross_ng[:, ptr * frame_num:(ptr + batch_size) * frame_num] = frame_fea_k.T
+        self.queue_frame_proj_ng[:, ptr_frame:ptr_frame + frame_num*batch_size] = frame_proj_k.T
+        self.queue_frame_cross_ng[:, ptr_frame:ptr_frame + frame_num*batch_size] = frame_fea_k.T
         # move pointer
         ptr = (ptr + batch_size) % self.contrast_num_negative
-
+        ptr_frame = (ptr_frame + frame_num*batch_size) % self.contrast_num_negative
         # if self.rank == 0:
         #     logger.info("end>>>>: ptr:{}".format(ptr))
         self.queue_ptr[0] = ptr
+        self.queue_ptr_frame[0] = ptr_frame
 
     def contrastive_loss(self, q, k, queue):
 
