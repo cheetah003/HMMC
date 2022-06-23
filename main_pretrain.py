@@ -203,9 +203,9 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
-    # if args.local_rank == 0:
-    #     for name, parameters in model.named_parameters():
-    #         logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
+    if args.local_rank == 0:
+        for name, parameters in model.named_parameters():
+            logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
     return optimizer, scheduler, model
 
 

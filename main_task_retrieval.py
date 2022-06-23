@@ -39,7 +39,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--use_frame_fea", action='store_true', help="whether use frame feature matching text")
     parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
-    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt", "vatex", "msvd"],
+    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt", "vatex"],
                         help="choose dataset.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
@@ -206,9 +206,9 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
-    # if args.local_rank == 0:
-    #     for name, parameters in model.named_parameters():
-    #         logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
+    if args.local_rank == 0:
+        for name, parameters in model.named_parameters():
+            logger.info("name:{} requires_grad:{} size:{}".format(name, parameters.requires_grad, parameters.size()))
     return optimizer, scheduler, model
 
 
@@ -396,8 +396,6 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             if multi_sentence_:
                 # multi-sentences retrieval means: one frame clip has two or more descriptions.
                 b, *_t = video.shape
-                # logger.info("query_ids.shape:{}".format(query_ids.shape))
-                # logger.info("video.shape:{}".format(video.shape))
                 query_output = model.text_encoder(query_ids, query_mask)
                 batch_query_output_list.append(query_output)
                 title_output = torch.zeros_like(query_output)
