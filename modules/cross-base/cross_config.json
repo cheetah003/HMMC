@@ -8,9 +8,9 @@
   "co_attention_layers": 4,
   "proj_num_layers": 2,
   "pred_num_layers": 2,
-  "weight_FAM": 0.0,
-  "weight_VTM": 0.5,
-  "weight_FTM": 0.5,
-  "weight_MLM": 0.0,
+  "weight_FAM": 0.05,
+  "weight_VTM": 0.45,
+  "weight_FTM": 0.45,
+  "weight_MLM": 0.05,
   "pretrained_clip_name": "ViT-B/32"
 }

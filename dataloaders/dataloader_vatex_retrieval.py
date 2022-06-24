@@ -13,7 +13,7 @@ import cv2
 from PIL import Image
 from torchvision import transforms
 import lmdb
-g_lmdb_frames = 24
+g_lmdb_frames = 30
 
 
 class VATEX_multi_sentence_dataLoader(Dataset):
