@@ -20,7 +20,7 @@ from .until_config import PretrainedConfig
 from .until_module import PreTrainedModel, LayerNorm, ACT2FN
 from collections import OrderedDict
 from modules.module_clip import build_model, CLIP, convert_weights
-from transformers import AutoConfig, AutoModel, BertTokenizer
+from transformers import AutoConfig, AutoModel, RobertaModel, RobertaConfig
 
 
 logger = logging.getLogger(__name__)
@@ -260,6 +260,8 @@ class TextEncoder(nn.Module):
             if task_config.rank == 0:
                 logger.info("name:{},chinesebert_config:{}".format(pretrained, t_config))
             self.chinese_encoder = AutoModel.from_pretrained(pretrained)
+            # logger.info("random Roberta")
+            # self.chinese_encoder = RobertaModel(RobertaConfig())
             self.text_proj = nn.Linear(cross_config.chinese_hidden_size, cross_config.temporal_hidden_size)
         else:
             raise NotImplementedError("wrong language")

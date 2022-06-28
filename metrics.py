@@ -9,8 +9,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def compute_metrics(x):
-    # logger.info("sx:{}".format(np.argmax(x, axis=1)))
+def compute_metrics(x, log=False):
+    if log:
+        t2v_sx = np.argmax(x, axis=1)
+        correct = []
+        for i in range(len(t2v_sx)):
+            if i == t2v_sx[i]:
+                correct.append(i)
+        logger.info("correct:{}".format(correct))
     sx = np.sort(-x, axis=1)
     d = np.diag(-x)
     d = d[:, np.newaxis]
@@ -116,6 +122,7 @@ def logging_rank(sim_matrix, multi_sentence_, cut_off_points_, logger):
 
         # compute text-to-video retrieval
         tv_metrics = compute_metrics(sim_matrix)
+        # tv_metrics = compute_metrics(sim_matrix, log=True)
 
         # compute video-to-text retrieval
         vt_metrics = compute_metrics(sim_matrix.T)

@@ -435,8 +435,8 @@ class BirdModel(BirdPreTrainedModel):
         self.task_config = task_config
         self.rank = task_config.local_rank
         # self.weight_sim = torch.nn.Parameter(torch.tensor([0.9], dtype=torch.float32), requires_grad=True)
-        self.weight_VTM = cross_config.weight_VTM
-        self.weight_FTM = cross_config.weight_FTM
+        self.weight_VTM_finetune = cross_config.weight_VTM_finetune
+        self.weight_FTM_finetune = cross_config.weight_FTM_finetune
         self.top_frames = task_config.top_frames
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
@@ -486,11 +486,11 @@ class BirdModel(BirdPreTrainedModel):
             # frame loss
             if self.task_config.use_frame_fea:
                 frame_loss = self.frame_loss(query_output, frame_output)
-                loss += self.weight_FTM * frame_loss
+                loss += self.weight_FTM_finetune * frame_loss
             # video loss
             sim_matrix = self.loose_similarity(query_output, visual_output)
             sim_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
-            loss += self.weight_VTM * sim_loss
+            loss += self.weight_VTM_finetune * sim_loss
             # loss += sim_loss
 
             if self.task_config.local_rank == 0:
@@ -513,8 +513,8 @@ class BirdModel_VT(BirdPreTrainedModel):
         self.rank = task_config.local_rank
         # self.weight_sim = torch.nn.Parameter(torch.tensor([0.3], dtype=torch.float32), requires_grad=True)
         # self.weight_frame = torch.nn.Parameter(torch.tensor([0.1], dtype=torch.float32), requires_grad=True)
-        self.weight_VTM = cross_config.weight_VTM
-        self.weight_FTM = cross_config.weight_FTM
+        self.weight_VTM = cross_config.weight_VTM_finetune
+        self.weight_FTM = cross_config.weight_FTM_finetune
         ################## text Encoder
         self.text_encoder = TextEncoder(self.task_config, cross_config)
         ################## visual_encoder

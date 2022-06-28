@@ -12,5 +12,7 @@
   "weight_VTM": 0.45,
   "weight_FTM": 0.45,
   "weight_MLM": 0.05,
+  "weight_VTM_finetune": 0.85,
+  "weight_FTM_finetune": 0.15,
   "pretrained_clip_name": "ViT-B/32"
 }

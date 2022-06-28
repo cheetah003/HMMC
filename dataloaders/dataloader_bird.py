@@ -101,7 +101,7 @@ class dataload_bird_pretrain(VisionDataset):
         self.datalist = read_json_line(json_path)
 
         # for fast debug
-        self.datalist = self.datalist[::10]
+        # self.datalist = self.datalist[::10]
 
         self._length = len(self.datalist)
         if self.language == "chinese":
