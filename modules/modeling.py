@@ -344,7 +344,8 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         if self.training:
             # loss = 0.0
             v_fea, frame_fea = self.visual_encoder(video, video_frame)
-            tag_fea = self.text_encoder(tag_ids, tag_mask)
+            if self.task_config.dataset == "bird":
+                tag_fea = self.text_encoder(tag_ids, tag_mask)
             title_fea = self.text_encoder(title_ids, title_mask)
 
             # for video self supervised learning
@@ -382,24 +383,25 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             # single video modality: video queue loss
             loss_FAM = self.frame_self_loss(frame_pred, frame_proj_k, self.queue_frame_proj_ng)
             # cross modality: cross queue loss
-            v_tag_queue_loss = self.contrastive_loss(v_fea, tag_fea_k, self.queue_tag_cross_ng) \
-                               + self.contrastive_loss(tag_fea, v_fea_k, self.queue_v_cross_ng)
             v_title_queue_loss = self.contrastive_loss(v_fea, title_fea_k, self.queue_title_cross_ng) \
                                  + self.contrastive_loss(title_fea, v_fea_k, self.queue_v_cross_ng)
-            ####### for in batch
-            # sim_matrix_tag = self.loose_similarity(tag_fea, v_fea)
-            # v_tag_queue_loss = self.loss_fct(sim_matrix_tag) + self.loss_fct(sim_matrix_tag.T)
-            # sim_matrix_title = self.loose_similarity(title_fea, v_fea)
-            # v_title_queue_loss = self.loss_fct(sim_matrix_title) + self.loss_fct(sim_matrix_title.T)
-            ###### end in batch
-            loss_VTM = (v_tag_queue_loss + v_title_queue_loss) / 2
+            if self.task_config.dataset == "bird":
+                v_tag_queue_loss = self.contrastive_loss(v_fea, tag_fea_k, self.queue_tag_cross_ng) \
+                                   + self.contrastive_loss(tag_fea, v_fea_k, self.queue_v_cross_ng)
+                loss_VTM = (v_tag_queue_loss + v_title_queue_loss) / 2
+            else:
+                loss_VTM = v_title_queue_loss
+
             loss_FTM = 0.
             if self.task_config.use_frame_fea:
-                frame_tag_loss = self.frame_cross_loss(frame_fea, frame_fea_k, self.queue_frame_cross_ng, tag_fea,
-                                                       tag_fea_k, self.queue_tag_cross_ng)
                 frame_title_loss = self.frame_cross_loss(frame_fea, frame_fea_k, self.queue_frame_cross_ng, title_fea,
                                                          title_fea_k, self.queue_title_cross_ng)
-                loss_FTM += (frame_tag_loss + frame_title_loss) / 2
+                if self.task_config.dataset == "bird":
+                    frame_tag_loss = self.frame_cross_loss(frame_fea, frame_fea_k, self.queue_frame_cross_ng, tag_fea,
+                                                           tag_fea_k, self.queue_tag_cross_ng)
+                    loss_FTM += (frame_tag_loss + frame_title_loss) / 2
+                else:
+                    loss_FTM = frame_title_loss
 
             # single text modality: text queue loss
             # t_queue_loss = self.contrastive_loss(title_fea, tag_fea_k, self.queue_tag_cross_ng) \
@@ -409,9 +411,13 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             self._dequeue_and_enqueue(v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k)
 
             # mlm loss
-            mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
+
             mlm_title_loss = self.get_mlm_loss(title_ids, title_mask)
-            loss_MLM = (mlm_tag_loss + mlm_title_loss) / 2
+            if self.task_config.dataset == "bird":
+                mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
+                loss_MLM = (mlm_tag_loss + mlm_title_loss) / 2
+            else:
+                loss_MLM = mlm_title_loss
 
             # total loss
             loss = self.weight_FAM * loss_FAM + self.weight_VTM * loss_VTM + self.weight_FTM * loss_FTM + self.weight_MLM * loss_MLM

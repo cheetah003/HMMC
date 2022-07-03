@@ -105,6 +105,23 @@ def dataloader_msrvtt_test(args, tokenizer):
     return dataloader, len(msrvtt_testset)
 
 
+def dataloader_vatex_pretrain(args, tokenizer):
+    vatex_pretrainset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
+                                          data_path='/ai/swxdisk/data/vatex', tokenizer=tokenizer, subset="pretrain",
+                                          frame_sample=args.frame_sample, max_frames=args.max_frames)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(vatex_pretrainset)
+    dataloader = DataLoader(
+        vatex_pretrainset,
+        batch_size=args.batch_size // args.n_gpu,
+        num_workers=args.num_thread_reader,
+        pin_memory=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        drop_last=True,
+    )
+    return dataloader, len(vatex_pretrainset), train_sampler
+
+
 def dataloader_vatex_train(args, tokenizer):
     vatex_trainset = VATEX_multi_sentence_dataLoader(root='/ai/swxdisk/data/vatex/vatex_lmdb', language=args.language,
                                           data_path='/ai/swxdisk/data/vatex', tokenizer=tokenizer, subset="train",
@@ -156,5 +173,5 @@ DATALOADER_DICT = {}
 DATALOADER_DICT["bird"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_bird_train,
                            "test": dataloader_bird_test, "debug_test": dataloader_bird_debug_test}
 DATALOADER_DICT["msrvtt"] = {"train": dataloader_msrvtt_train, "test": dataloader_msrvtt_test}
-DATALOADER_DICT["vatex"] = {"train": dataloader_vatex_train, "val": dataloader_vatex_val,
-                            "test": dataloader_vatex_test}
+DATALOADER_DICT["vatex"] = {"pretrain": dataloader_vatex_pretrain, "train": dataloader_vatex_train,
+                            "val": dataloader_vatex_val, "test": dataloader_vatex_test}

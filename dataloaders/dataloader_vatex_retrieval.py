@@ -56,8 +56,9 @@ class VATEX_multi_sentence_dataLoader(Dataset):
         self.frame_sample = frame_sample
         self.resolution = image_resolution
         # load the id of split list
-        assert self.subset in ["train", "val", "test"]
+        assert self.subset in ["pretrain", "train", "val", "test"]
         video_id_path_dict = {}
+        video_id_path_dict["pretrain"] = os.path.join(self.data_path, "train_list.txt")
         video_id_path_dict["train"] = os.path.join(self.data_path, "train_list.txt")
         video_id_path_dict["val"] = os.path.join(self.data_path, "val_list.txt")
         video_id_path_dict["test"] = os.path.join(self.data_path, "test_list.txt")
@@ -244,7 +245,9 @@ class VATEX_multi_sentence_dataLoader(Dataset):
 
         #obtain video data
         video = self._get_video(video_id, self.max_frames)
-        if self.subset == "train":
+        if self.subset == "pretrain":
+            return video, self.max_frames, pairs_text, pairs_mask, pairs_text, pairs_mask
+        elif self.subset == "train":
             return pairs_text, pairs_mask, video, self.max_frames, idx
         else:
             return pairs_text, pairs_mask, video, self.max_frames
