@@ -24,9 +24,31 @@
   </a>
 </p>
 
-The implementation of paper End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval.
+The implementation of paper "End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval".
 
-HMMC(Hierarchical Matching and Momentum Contrast) is a text-video retrieval model based on [CLIP](https://github.com/openai/CLIP), which pre-trained on 400M image-text pairs in an end-to-end manner. We introduce HMMC model for video-language pre-training, taking advantage of both global video representation and frame features with a hierarchical matching mechanism. We also collected a large-scale Chinese video-language dataset (over 763k unique videos) named CHVTT to explore the multilevel semantic connections between videos and texts. Experimental results on two major Text-video retrieval benchmark datasets demonstrate the advantages of our methods.
+HMMC(Hierarchical Matching and Momentum Contrast) is a text-video retrieval model(support Chinese and English) based on [CLIP](https://github.com/openai/CLIP), which pre-trained on 400M image-text pairs in an end-to-end manner. We introduce HMMC model for video-language pre-training, taking advantage of both global video representation and frame features with a hierarchical matching mechanism. We also collected a large-scale Chinese video-language dataset (over 763k unique videos) named CHVTT to explore the multilevel semantic connections between videos and texts. Experimental results on two major Text-video retrieval benchmark datasets demonstrate the advantages of our methods.
+
 
 ## Model Architecture
+#### Overall Architecture ####
+![Architecture](pics/model.png)
+#### Hierarchical Matching ####
+![HM](pics/HM_train.png)
 
+
+## Visualization
+#### Results ####
+![results](pics/visualHM.png)
+#### Attention map ####
+![Attention](pics/visual_attention1.png)
+
+
+## Requirement
+```
+pip install -r requirements.txt
+```
+
+## Data Preparing
+* MSR-VTT
+* VATEX-English Version
+* VATEX-Chinese Version
