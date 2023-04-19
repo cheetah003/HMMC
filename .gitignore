@@ -2,5 +2,5 @@
 .idea
 *.txt
 *.out
+ckpts
 *.pyc
-*.ai

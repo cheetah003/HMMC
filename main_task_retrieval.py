@@ -340,10 +340,15 @@ def _run_on_single_gpu(model, batch_query_output_list, batch_visual_output_list,
             each_row.append(b1b2_logits)
             title_each_row.append(title_logits)
             frame_each_row.append(frame_logits)
+            # logger.info("b1b2_logits:{}".format(b1b2_logits.shape))
+            # logger.info("frame_logits:{}".format(frame_logits.shape))
 
         each_row = np.concatenate(tuple(each_row), axis=-1)
+        # logger.info("each_row:{}".format(each_row.shape))
         title_each_row = np.concatenate(tuple(title_each_row), axis=-1)
-        frame_each_row = np.concatenate(tuple(frame_each_row), axis=-1)
+        # frame_each_row = np.concatenate(tuple(frame_each_row), axis=-1)
+        frame_each_row = np.concatenate(tuple(frame_each_row), axis=1)
+        # logger.info("frame_each_row:{}".format(frame_each_row.shape))
         # sim_matrix.append(preprocessing.scale(each_row, axis=1))
         sim_matrix.append(each_row)
         sim_matrix_title.append(title_each_row)
@@ -427,8 +432,8 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                 # logger.info("query_output.shape:{}".format(query_output.shape))
                 # logger.info("weight_VTM:{},weight_FTM:{},exp:{}".format(model.weight_VTM, model.weight_FTM,
                 #                                                         model.text_encoder.logit_scale.exp()))
-                # logger.info("visual_output.shape:{}".format(visual_output.shape))
-                # logger.info("frame_output.shape:{}".format(frame_output.shape))
+                logger.info("visual_output.shape:{}".format(visual_output.shape))
+                logger.info("frame_output.shape:{}".format(frame_output.shape))
 
                 batch_query_output_list.append(query_output)
                 batch_visual_output_list.append(visual_output)
@@ -489,7 +494,21 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
             sim_matrix_title = np.concatenate(tuple(sim_matrix_title), axis=0)
             sim_matrix_frame = np.concatenate(tuple(sim_matrix_frame), axis=0)
 
-        # logger.info("sim_matrix:{}".format(sim_matrix))
+            # batch_visual_output_list = torch.cat(batch_visual_output_list, dim=0)
+            # batch_frame_output_list = torch.cat(batch_frame_output_list, dim=0)
+            # batch_visual_output_list = batch_visual_output_list.cpu().detach().numpy()
+            # batch_frame_output_list = batch_frame_output_list.cpu().detach().numpy()
+            # np.save("/ai/swxdisk/data/vatex/features/Chinese_batch_visual_output_list", batch_visual_output_list)
+            # np.save("/ai/swxdisk/data/vatex/features/Chinese_batch_frame_output_list", batch_frame_output_list)
+            # np.save("/ai/swxdisk/data/vatex/features/English_batch_visual_output_list", batch_visual_output_list)
+            # np.save("/ai/swxdisk/data/vatex/features/English_batch_frame_output_list", batch_frame_output_list)
+
+        # logger.info("sim_matrix:{}".format(sim_matrix.shape))
+        # logger.info("sim_matrix_frame:{}".format(sim_matrix_frame.shape))
+        # np.save("/ai/swxdisk/data/msrvtt/visualize/sim_matrix", sim_matrix)
+        # np.save("/ai/swxdisk/data/msrvtt/visualize/sim_matrix_frame_top2", sim_matrix_frame)
+        # sim_matrix_frame = np.topk(sim_matrix_frame, k=model.top_frames, dim=2)[0]
+        # sim_matrix_frame = np.mean(sim_matrix_frame, dim=2)
         if args.use_frame_fea:
             sim_matrix += sim_matrix_frame
 

@@ -154,6 +154,7 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
         self.loss_fct = CrossEn()
         self.loss_fct_dual = Dual_CrossEn()
 
+
         # self.apply(self.init_weights)
 
     def get_mlm_loss(self, input_ids, input_mask):
@@ -433,6 +434,215 @@ class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
             return loss
         else:
             return None
+
+###################### this model is just for compare momentum queue and inbatch negative ##########
+# class BirdPreTrainedModel(CLIP4ClipPreTrainedModel):
+#     def __init__(self, cross_config, task_config):
+#         super(BirdPreTrainedModel, self).__init__(cross_config)
+#         self.task_config = task_config
+#         self.rank = task_config.local_rank
+#         self.mlm_probability = cross_config.mlm_probability
+#         self.top_frames = task_config.top_frames
+#         # self.weight_sum = torch.nn.Parameter(torch.tensor([0.5], dtype=torch.float32), requires_grad=True)
+#         self.weight_FAM = cross_config.weight_FAM
+#         self.weight_VTM = cross_config.weight_VTM
+#         self.weight_FTM = cross_config.weight_FTM
+#         self.weight_MLM = cross_config.weight_MLM
+#         self.contrast_momentum = task_config.contrast_momentum
+#         self.contrast_temperature = task_config.contrast_temperature
+#         self.contrast_num_negative = task_config.contrast_num_negative
+#         ################## chinese text Encoder
+#         if self.task_config.language == "chinese":
+#             self.tokenizer = BertTokenizer.from_pretrained(self.task_config.pretrained_text)
+#         else:
+#             self.tokenizer = ClipTokenizer()
+#         if self.rank == 0:
+#             logger.info("voacb_size:{}".format(self.tokenizer.vocab_size))
+#         t_config = AutoConfig.from_pretrained(self.task_config.pretrained_text)
+#         self.text_encoder = TextEncoder(self.task_config, cross_config)
+#
+#         # for MLM
+#         t_config.hidden_size = cross_config.temporal_hidden_size
+#         t_config.vocab_size = self.tokenizer.vocab_size
+#         self.cls = BertLMPredictionHead(t_config)
+#         ################## visual_encoder
+#         self.visual_encoder = VisualEncoder(self.task_config, cross_config)
+#
+#         ################## loss function
+#         self.loss_fct = CrossEn()
+#         self.loss_fct_dual = Dual_CrossEn()
+#
+#
+#         # self.apply(self.init_weights)
+#
+#     def get_mlm_loss(self, input_ids, input_mask):
+#         to_mask_input_ids = input_ids.clone()
+#         input_labels = to_mask_input_ids.clone()
+#         input_probability_matrix = torch.full(input_labels.shape, self.mlm_probability)
+#         masked_input_ids, input_labels = self.mask(to_mask_input_ids, self.tokenizer.vocab_size,
+#                                                    input_mask.device, targets=input_labels,
+#                                                    probability_matrix=input_probability_matrix)
+#         masked_input_output = self.text_encoder(masked_input_ids, input_mask, return_hidden=True)
+#         mlm_input_loss = self.calculate_mlm_loss(masked_input_output, input_labels)
+#         return mlm_input_loss
+#
+#     def calculate_mlm_loss(self, sequence_output_mlm, labels):
+#
+#         mlm_scores = self.cls(sequence_output_mlm)
+#         # logger.info("sequence_output_mlm.shape:{}".format(sequence_output_mlm.shape))
+#         # logger.info("mlm_scores.shape:{}".format(mlm_scores.shape))
+#         # logger.info("labels.shape:{}".format(labels.shape))
+#         mlm_loss = F.cross_entropy(mlm_scores.view(-1, self.tokenizer.vocab_size),
+#                                    labels.view(-1), ignore_index=-100)
+#         return mlm_loss
+#
+#     def mask(self, input_ids, vocab_size, device, targets=None, masked_indices=None, probability_matrix=None):
+#         if masked_indices is None:
+#             masked_indices = torch.bernoulli(probability_matrix).bool()
+#
+#         masked_indices[input_ids == self.tokenizer.pad_token_id] = False
+#         masked_indices[input_ids == self.tokenizer.cls_token_id] = False
+#         # logger.info("masked_indices:{}".format(masked_indices))
+#         # logger.info("masked_indices.shape:{}".format(masked_indices.shape))
+#         if targets is not None:
+#             targets[~masked_indices] = -100  # We only compute loss on masked tokens
+#
+#         # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+#         indices_replaced = torch.bernoulli(torch.full(input_ids.shape, 0.8)).bool() & masked_indices
+#         input_ids[indices_replaced] = self.tokenizer.mask_token_id
+#
+#         # 10% of the time, we replace masked input tokens with random word
+#         indices_random = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~indices_replaced
+#         random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long).to(device)
+#         input_ids[indices_random] = random_words[indices_random]
+#         # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+#
+#         if targets is not None:
+#             return input_ids, targets
+#         else:
+#             return input_ids
+#
+#     def loose_similarity(self, sequence_output, visual_output):
+#         sequence_output, visual_output = sequence_output.contiguous(), visual_output.contiguous()
+#
+#         visual_output = visual_output.squeeze()
+#         visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
+#
+#         sequence_output = sequence_output.squeeze()
+#         sequence_output = sequence_output / sequence_output.norm(dim=-1, keepdim=True)
+#
+#         logit_scale = self.text_encoder.logit_scale.exp()
+#         logit_scale.data = torch.clamp(logit_scale.data, max=100)
+#         # if self.rank == 0:
+#         #     logger.info("logit_scale:{},dtype:{}".format(logit_scale, logit_scale.dtype))
+#         #     logger.info("sequence_output.shape:{}".format(sequence_output.shape))
+#         #     logger.info("visual_output.shape:{}".format(visual_output.shape))
+#         if len(visual_output.shape) == 2:
+#             retrieve_logits = logit_scale * torch.matmul(sequence_output, visual_output.t())
+#         else:
+#             visual_temp = visual_output.permute(0, 2, 1)
+#             retrieve_logits = logit_scale * torch.matmul(sequence_output, visual_temp)
+#             retrieve_logits = retrieve_logits.permute(1, 0, 2)
+#
+#         return retrieve_logits
+#
+#     def forward(self, video_data, video_frame, tag_ids, tag_mask, title_ids, title_mask, global_step):
+#         tag_ids = tag_ids.view(-1, tag_ids.shape[-1])
+#         tag_mask = tag_mask.view(-1, tag_mask.shape[-1])
+#         title_ids = title_ids.view(-1, title_ids.shape[-1])
+#         title_mask = title_mask.view(-1, title_mask.shape[-1])
+#         # bs x frames x 3 x H x W
+#         video = torch.as_tensor(video_data)
+#
+#         if self.rank == 0 and global_step % self.task_config.n_display == 0:
+#             logger.info("video1.shape:{}, dtype:{}, device:{}".format(video.shape, video.dtype, video.device))
+#
+#         if self.training:
+#             # loss = 0.0
+#             v_fea, frame_fea = self.visual_encoder(video, video_frame)
+#             if self.task_config.dataset == "bird":
+#                 tag_fea = self.text_encoder(tag_ids, tag_mask)
+#             title_fea = self.text_encoder(title_ids, title_mask)
+#
+#             # for video self supervised learning
+#             # [bs,hidden_size]
+#             # bs, frame, hidden = frame_fea.shape
+#             # frame_fea = frame_fea.view(-1, hidden)
+#             v_fea = dist_collect(v_fea).squeeze(1)
+#             title_fea = dist_collect(title_fea).squeeze(1)
+#             frame_fea = dist_collect(frame_fea).squeeze(1)
+#             tag_fea = dist_collect(tag_fea).squeeze(1)
+#             if self.rank == 0 and global_step % self.task_config.n_display == 0:
+#                 logger.info("v_fea.shape:{},device:{}".format(v_fea.shape, v_fea.device))
+#                 logger.info("frame_fea.shape:{},device:{}".format(frame_fea.shape, frame_fea.device))
+#                 # logger.info("frame_proj.shape:{},device:{}".format(frame_proj.shape, frame_proj.device))
+#                 logger.info("title_fea.shape:{}".format(title_fea.shape))
+#
+#             # compute loss
+#             if self.rank == 0 and global_step % self.task_config.n_display == 0:
+#                 logger.info("dtype: v_fea:{},title_fea:{}".format(v_fea.dtype, title_fea.dtype))
+#             # single video modality: video queue loss
+#             loss_FAM = 0.
+#             # cross modality: cross queue loss
+#             sim_matrix = self.loose_similarity(title_fea, v_fea)
+#             v_title_queue_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+#
+#             if self.task_config.dataset == "bird":
+#                 sim_matrix = self.loose_similarity(tag_fea, v_fea)
+#                 v_tag_queue_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+#                 loss_VTM = (v_tag_queue_loss + v_title_queue_loss) / 2
+#             else:
+#                 loss_VTM = v_title_queue_loss
+#
+#             loss_FTM = 0.
+#             if self.task_config.use_frame_fea:
+#                 frame_title_loss = 0.
+#                 for i in range(frame_fea.size(1)):
+#                     sim_matrix = self.loose_similarity(title_fea, frame_fea[:, i, :])
+#                     temp_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+#                     frame_title_loss += temp_loss
+#                 frame_title_loss = frame_title_loss / frame_fea.size(1)
+#                 if self.task_config.dataset == "bird":
+#                     frame_tag_loss = 0.
+#                     for i in range(frame_fea.size(1)):
+#                         sim_matrix = self.loose_similarity(tag_fea, frame_fea[:, i, :])
+#                         temp_loss = self.loss_fct(sim_matrix) + self.loss_fct(sim_matrix.T)
+#                         frame_tag_loss += temp_loss
+#                     frame_tag_loss = frame_tag_loss / frame_fea.size(1)
+#                     loss_FTM += (frame_tag_loss + frame_title_loss) / 2
+#                 else:
+#                     loss_FTM = frame_title_loss
+#
+#             # single text modality: text queue loss
+#             # t_queue_loss = self.contrastive_loss(title_fea, tag_fea_k, self.queue_tag_cross_ng) \
+#             #                + self.contrastive_loss(tag_fea, title_fea_k, self.queue_v_cross_ng)
+#
+#             # dequeue_and_enqueue
+#             # self._dequeue_and_enqueue(v_fea_k, tag_fea_k, title_fea_k, frame_fea_k, frame_proj_k)
+#
+#             # mlm loss
+#
+#             # mlm_title_loss = self.get_mlm_loss(title_ids, title_mask)
+#             # if self.task_config.dataset == "bird":
+#             #     mlm_tag_loss = self.get_mlm_loss(tag_ids, tag_mask)
+#             #     loss_MLM = (mlm_tag_loss + mlm_title_loss) / 2
+#             # else:
+#             #     loss_MLM = mlm_title_loss
+#             loss_MLM = 0.
+#             # total loss
+#             loss = self.weight_FAM * loss_FAM + self.weight_VTM * loss_VTM + self.weight_FTM * loss_FTM + self.weight_MLM * loss_MLM
+#             if self.rank == 0:
+#                 if global_step % self.task_config.n_display == 0:
+#                     logger.info("loss:{},loss_FAM:{},loss_VTM:{},loss_FTM:{},loss_MLM:{}"
+#                                 "".format(loss, loss_FAM, loss_VTM, loss_FTM, loss_MLM))
+#                 if self.task_config.logdir:
+#                     loss_item = {"loss": float(loss), "loss_FAM": float(loss_FAM), "loss_VTM": float(loss_VTM),
+#                                  "loss_FTM": float(loss_FTM), "loss_MLM": float(loss_MLM)}
+#                     self.task_config.writer.add_scalars('loss', loss_item, global_step=global_step)
+#                     # self.task_config.writer.add_scalar('loss', video_cross_loss, global_step=global_step)
+#             return loss
+#         else:
+#             return None
 
 
 class BirdModel(BirdPreTrainedModel):

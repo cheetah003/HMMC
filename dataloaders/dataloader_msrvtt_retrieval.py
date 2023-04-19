@@ -18,6 +18,8 @@ from dataloaders.rawvideo_util import RawVideoExtractor
 from torchvision import transforms
 from PIL import ImageFilter
 from dataloaders.randaugment import RandomAugment
+import logging
+logger = logging.getLogger(__name__)
 
 # global, number of frames in lmdb per video
 g_lmdb_frames = 30
@@ -101,7 +103,7 @@ class MSRVTT_DataLoader(VisionDataset):
         if len(words) > total_length_with_CLS:
             words = words[:total_length_with_CLS]
         words = words + [self.SPECIAL_TOKEN["SEP_TOKEN"]]
-
+        # logger.info("video_id:{},words:{}".format(video_id, words))
         input_ids = self.tokenizer.convert_tokens_to_ids(words)
         input_mask = [1] * len(input_ids)
         segment_ids = [0] * len(input_ids)
@@ -135,6 +137,10 @@ class MSRVTT_DataLoader(VisionDataset):
             frame_buffer = np.frombuffer(video, dtype=np.uint8)
             # print("frame_buffer.shape:{}".format(frame_buffer.shape))
             frame_data = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+            ############# for save pic ########
+            # filename = "/ai/swxdisk/data/msrvtt/pic/" + video_id + "_%d.jpg" % i
+            # cv2.imwrite(filename, frame_data, [cv2.IMWRITE_JPEG_QUALITY, 100])
+
             # print("frame_data.shape:{}".format(frame_data.shape))
             frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
             frame_img = Image.fromarray(frame_rgb).convert("RGB")
@@ -154,6 +160,7 @@ class MSRVTT_DataLoader(VisionDataset):
 
         pairs_text, pairs_mask, pairs_segment, choice_video_ids = self._get_text(video_id, sentence)
         video = self._get_rawvideo(choice_video_ids)
+        # logger.info("idx:{},video_id:{},sentence:{},pairs_mask:{}".format(idx, video_id, sentence, pairs_mask))
         return pairs_text, pairs_mask, video, self.max_frames
 
 
