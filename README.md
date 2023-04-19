@@ -3,7 +3,7 @@
 </div>
 
 <p style="text-align:center">
-<a href="https://huggingface.co/spaces/xiaosu-zhu/McQuic" target="_blank">Demo</a>
+<a href="https://huggingface.co/spaces/cheetah003/HMMC_t2v_search" target="_blank">Demo</a>
 </p>
 
 <p style="text-align:center">
