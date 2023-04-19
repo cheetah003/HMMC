@@ -1,9 +1,9 @@
 <div style="text-align:center"><h1>HMMC<br/></h1>
-<h3>End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval</h3>
+<h2>End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval</h2>
 </div>
 
 <p style="text-align:center">
-<a href="https://huggingface.co/spaces/cheetah003/HMMC_t2v_search" target="_blank">Demo</a>
+<a href="https://huggingface.co/spaces/cheetah003/HMMC_t2v_search" target="_blank">Try Demo here</a>
 </p>
 
 <p style="text-align:center">
@@ -30,17 +30,10 @@ HMMC(Hierarchical Matching and Momentum Contrast) is a text-video retrieval mode
 
 
 ## Model Architecture
-#### Overall Architecture ####
+### Overall Architecture: ###
 ![Architecture](pics/model.png)
-#### Hierarchical Matching ####
+#### Hierarchical Matching: ####
 ![HM](pics/HM_train.png)
-
-
-## Visualization
-#### Results ####
-![results](pics/visualHM.png)
-#### Attention map ####
-![Attention](pics/visual_attention1.png)
 
 
 ## Requirement
@@ -49,6 +42,18 @@ pip install -r requirements.txt
 ```
 
 ## Data Preparing
-* MSR-VTT
-* VATEX-English Version
-* VATEX-Chinese Version
+
+### Public Datasets ###
+* MSR-VTT [download link](http://ms-multimedia-challenge.com/2017/dataset)
+
+* VATEX(Chinese and English version) [download link](https://eric-xw.github.io/vatex-website/download.html)
+
+### Write videos to lmdb ###
+
+
+
+## Visualization
+### Results: ###
+![results](pics/visualHM.png)
+### Attention map: ###
+![Attention](pics/visual_attention1.png)
