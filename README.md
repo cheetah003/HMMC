@@ -1,5 +1,5 @@
 <div style="text-align:center"><h1>HMMC<br/></h1>
-<h4>End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval</h4>
+<h3>End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval</h3>
 </div>
 
 <p style="text-align:center">

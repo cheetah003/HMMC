@@ -1,6 +1,5 @@
 .git
 .idea
-*.txt
 *.out
 ckpts
 *.pyc
