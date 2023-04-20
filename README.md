@@ -32,7 +32,7 @@ HMMC(Hierarchical Matching and Momentum Contrast) is a text-video retrieval mode
 ## Model Architecture
 ### Overall Architecture: ###
 ![Architecture](pics/model.png)
-#### Hierarchical Matching: ####
+### Hierarchical Matching: ###
 ![HM](pics/HM_train.png)
 
 
