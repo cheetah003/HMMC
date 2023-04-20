@@ -195,10 +195,12 @@ def main(targetDir, source_json_path, n_size, num_workers):
         json.dump({"length": len(lines) - len(error_video)}, fp)
 
 
-video_dir = "cfm_msrvtt_videos"  # video directory
-max_frames = 30  # frame nums of a video
+video_dir = "msrvtt_videos"  # video directory
+max_frames = 30  # sampling frame nums of a video
+lmdb_path = "msrvtt_lmdb"  # lmdb files will be created in this path
+json_path = "msrvtt.json"  # specify the video_ids(video name) in video dir you want to write to lmdb
 
 if __name__ == "__main__":
-    main(targetDir="msrvtt_lmdb", source_json_path="msrvtt.json", n_size=50, num_workers=20)
+    main(targetDir=lmdb_path, source_json_path="msrvtt.json", n_size=50, num_workers=20)
     # main(targetDir="pretrain_frame_lmdb", source_json_path="videoinfo_for_lmdb.json", n_size=1000, num_workers=20)
     # main(targetDir="videoinfo_lmdb", source_json_path="videolmdb.json", n_size=1850, num_workers=40)

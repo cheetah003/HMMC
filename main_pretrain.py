@@ -39,7 +39,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--use_frame_fea", action='store_true', help="whether use frame feature matching text")
     parser.add_argument('--task', type=str, default="retrieval", choices=["retrieval_VT", "retrieval"],
                         help="choose downstream task.")
-    parser.add_argument('--dataset', type=str, default="bird", choices=["bird", "msrvtt", "vatex"],
+    parser.add_argument('--dataset', type=str, default="chvtt", choices=["chvtt", "msrvtt", "vatex"],
                         help="choose dataset.")
     parser.add_argument('--num_thread_reader', type=int, default=1, help='')
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')

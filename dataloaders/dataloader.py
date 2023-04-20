@@ -170,7 +170,7 @@ def dataloader_vatex_test(args, tokenizer):
 
 
 DATALOADER_DICT = {}
-DATALOADER_DICT["bird"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_bird_train,
+DATALOADER_DICT["chvtt"] = {"pretrain": dataloader_bird_pretrain, "train": dataloader_bird_train,
                            "test": dataloader_bird_test, "debug_test": dataloader_bird_debug_test}
 DATALOADER_DICT["msrvtt"] = {"train": dataloader_msrvtt_train, "test": dataloader_msrvtt_test}
 DATALOADER_DICT["vatex"] = {"pretrain": dataloader_vatex_pretrain, "train": dataloader_vatex_train,
