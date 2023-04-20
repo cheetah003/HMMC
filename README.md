@@ -1,5 +1,5 @@
 <div style="text-align:center"><h1>HMMC<br/></h1>
-<h2>End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval</h2>
+<h2>Paper: End-to-end Pre-training with Hierarchical Matching and Momentum Contrast for Text-Video Retrieval</h2>
 </div>
 
 <p style="text-align:center">
@@ -49,7 +49,7 @@ pip install -r requirements.txt
 * VATEX(Chinese and English version) [download link](https://eric-xw.github.io/vatex-website/download.html)
 
 ### Write video frames to lmdb ###
-We found that pre-training on videos is a time-consuming task, especially when extracting raw frames from videos via OpenCV 2 . To address this issue, we pre-extract raw frames for efficiency and save them to lmdb. Dateloaders will directly read video frames from lmdb, which can speed up training. (e.g. We fine-tuned the model for 5 epochs with a 256 batch size on 8 NVIDIA Tesla V100 GPUs and it takes about 1 hour on MSR-VTT).
+We found that pre-training on videos is a time-consuming task, especially when extracting raw frames from videos via OpenCV. To address this issue, we pre-extract raw frames for efficiency and save them to lmdb. Dateloaders will directly read video frames from lmdb, which can speed up training. (e.g. We fine-tuned the model for 5 epochs with a 256 batch size on 8 NVIDIA Tesla V100 GPUs and it takes about 1 hour on MSR-VTT).
 
 Parameters such as video_dir and lmdb_path in tools/frame2lmdb.py can be changed and then run:
 ```
@@ -105,7 +105,7 @@ main_task_retrieval.py --do_train --num_thread_reader=8 \
 --task retrieval --dataset msrvtt --language english \
 --init_model ckpts/pretrain/english/FAM0_VTM0.45_FTM0.45_MLM0_m0.99_q1024_f30_whole/pytorch_model.bin.2
 ```
-to fine-tune pre-trained model on MSR-VTT in English for 5 epochs with 8 GPUs.
+to fine-tune the pre-trained model on MSR-VTT in English for 5 epochs with 8 GPUs.
 
 ### Testing: ###
 For example, run:
