@@ -4,6 +4,7 @@
 
 <p style="text-align:center">
 <a href="https://huggingface.co/spaces/cheetah003/HMMC_t2v_search" target="_blank">Try Demo here</a>
+Our Paper has been accecpted by <a href="https://ieeexplore.ieee.org/document/10124819" target="_blank">TIP 2023</a>
 </p>
 
 <p style="text-align:center">
@@ -178,6 +179,19 @@ We provide three models pre-trained on CHVTT, and then fine-tuned on MSR-VTT, VA
 ### Attention map: ###
 ![Attention](pics/visual_attention1.png)
 
+## If you find this work useful in your research, please cite the following paper:
+```
+@ARTICLE{HMMC,
+  author={Shen, Wenxue and Song, Jingkuan and Zhu, Xiaosu and Li, Gongfu and Shen, Heng Tao},
+  journal={IEEE Transactions on Image Processing}, 
+  title={End-to-End Pre-Training With Hierarchical Matching and Momentum Contrast for Text-Video Retrieval}, 
+  year={2023},
+  volume={32},
+  number={},
+  pages={5017-5030},
+  doi={10.1109/TIP.2023.3275071}}
+
+```
 ## Acknowledgments
 Our code is based on [CLIP](https://github.com/openai/CLIP) and [CLIP4Clip](https://github.com/ArrowLuo/CLIP4Clip/).
 We sincerely appreciate for their contributions.
